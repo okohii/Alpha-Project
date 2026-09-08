@@ -398,6 +398,46 @@ def _launch_posix(target: Path) -> None:
     subprocess.Popen([str(target)], close_fds=True, start_new_session=True)
 
 
+BROWSER_KEYS: set[str] = {
+    "chrome",
+    "google chrome",
+    "edge",
+    "microsoft edge",
+    "firefox",
+    "mozilla firefox",
+    "brave",
+    "brave browser",
+    "opera",
+    "opera browser",
+    "zen",
+    "zen browser",
+    "vivaldi",
+    "arc",
+}
+
+SITE_URLS: dict[str, str] = {
+    "linkedin": "https://www.linkedin.com",
+    "instagram": "https://www.instagram.com",
+    "facebook": "https://www.facebook.com",
+    "twitter": "https://twitter.com",
+    "x": "https://x.com",
+    "youtube": "https://www.youtube.com",
+    "whatsapp web": "https://web.whatsapp.com",
+    "gmail": "https://mail.google.com",
+    "google": "https://www.google.com",
+    "github": "https://github.com",
+    "stack overflow": "https://stackoverflow.com",
+    "netflix": "https://www.netflix.com",
+    "prime video": "https://www.primevideo.com",
+    "amazon": "https://www.amazon.com.br",
+    "reddit": "https://www.reddit.com",
+    "tiktok": "https://www.tiktok.com",
+    "chatgpt": "https://chatgpt.com",
+    "gemini": "https://gemini.google.com",
+    "notion": "https://www.notion.so",
+}
+
+
 def _normalize_url(value: str) -> str:
     url = (value or "").strip()
     if not url:
@@ -407,13 +447,64 @@ def _normalize_url(value: str) -> str:
     return url
 
 
-def _open_url_default(url: str) -> None:
+def _parse_shell_exe(command: str) -> str:
+    """Extrai o caminho do executável de um comando registrado no Windows."""
+    command = (command or "").strip()
+    quoted = re.match(r'^\s*"([^"]+)"', command)
+    if quoted:
+        return quoted.group(1).strip()
+    first = command.split(None, 1)
+    return first[0].strip('"') if first else ""
+
+
+def _default_browser_exe() -> str | None:
+    """Retorna o executável do navegador padrão do sistema (somente Windows)."""
+    if os.name != "nt":
+        return None
+    import winreg
+
+    progid: str | None = None
+    for root in (
+        r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice",
+        r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice",
+    ):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, root) as key:
+                progid, _ = winreg.QueryValueEx(key, "ProgId")
+            if progid:
+                break
+        except OSError:
+            continue
+    if not progid:
+        return None
+    for hive, base in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Classes"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Classes"),
+    ):
+        try:
+            with winreg.OpenKey(hive, rf"{base}\{progid}\shell\open\command") as key:
+                command, _ = winreg.QueryValueEx(key, "")
+        except OSError:
+            continue
+        exe = _parse_shell_exe(str(command))
+        if exe and Path(exe).exists():
+            return exe
+    return None
+
+
+def _open_url_default(url: str) -> str | None:
+    """Abre a URL no navegador padrão; retorna o executável usado (None = startfile)."""
+    exe = _default_browser_exe()
+    if exe:
+        subprocess.Popen([exe, url])
+        return exe
     if os.name == "nt":
         os.startfile(url)
     elif sys.platform == "darwin":
         subprocess.Popen(["open", url])
     else:
         subprocess.Popen(["xdg-open", url], close_fds=True, start_new_session=True)
+    return None
 
 
 class ApplicationLauncher:
@@ -424,6 +515,8 @@ class ApplicationLauncher:
     ) -> None:
         self.catalog = catalog or APP_CATALOG
         self.installed = installed or InstalledAppsProvider()
+        self.last_launched_browser: str | None = None
+        self._last_browser_ts: float = 0.0
 
     def _find_entry(self, normalized: str) -> AppCatalogEntry | None:
         best: AppCatalogEntry | None = None
@@ -501,4 +594,8 @@ class ApplicationLauncher:
             _launch_windows(target)
         else:
             _launch_posix(target)
+        key = _norm(info.get("app", ""))
+        if key in BROWSER_KEYS:
+            self.last_launched_browser = key
+            self._last_browser_ts = time.monotonic()
         return {**info, "launched": True, "args": args}

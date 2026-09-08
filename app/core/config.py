@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     debug_sensitive_logging: bool = False
 
     offline_timeout_seconds: float = 2.5
-    llm_timeout_seconds: float = 60.0
+    llm_timeout_seconds: float = 120.0
     web_timeout_seconds: float = 10.0
 
     use_sqlite_for_tests: bool = False

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -261,3 +262,125 @@ def test_open_app_tool_invalid_monitor_is_rejected():
     result = asyncio.run(tool.execute(app="bloco de notas", monitor=0))
     assert not result.success
     assert "Monitor" in str(result.error)
+
+
+def test_open_app_falls_back_to_site_when_app_not_installed(monkeypatch):
+    opened = {}
+    monkeypatch.setattr(
+        "app.skills.computer.tools.application._open_url_default",
+        lambda url: opened.update(url=url) or "C:/apps/zen.exe",
+    )
+    tool = OpenAppTool(ApplicationLauncher(catalog=[]))
+    result = asyncio.run(tool.execute(app="linkedin"))
+    assert result.success
+    assert result.data["site"] is True
+    assert result.data["url"] == "https://www.linkedin.com"
+    assert result.data["method"] == "browser"
+    assert opened["url"] == "https://www.linkedin.com"
+
+
+def test_open_app_site_fallback_prefers_provided_url(monkeypatch):
+    opened = {}
+    monkeypatch.setattr(
+        "app.skills.computer.tools.application._open_url_default",
+        lambda url: opened.update(url=url) or None,
+    )
+    tool = OpenAppTool(ApplicationLauncher(catalog=[]))
+    result = asyncio.run(tool.execute(app="github", url="github.com/okohii"))
+    assert result.success
+    assert result.data["url"] == "https://github.com/okohii"
+    assert opened["url"] == "https://github.com/okohii"
+
+
+def test_open_app_site_fallback_still_errors_for_unknown_app(monkeypatch):
+    tool = OpenAppTool(ApplicationLauncher(catalog=[]))
+    result = asyncio.run(tool.execute(app="aplicativo que nao existe xyz123"))
+    assert not result.success
+    assert "não encontrado" in str(result.error)
+
+
+def test_open_url_reuses_recently_opened_browser(monkeypatch):
+    launcher = ApplicationLauncher()
+    launcher.last_launched_browser = "chrome"
+    launcher._last_browser_ts = time.monotonic()
+    captured = {}
+    monkeypatch.setattr(
+        launcher,
+        "launch",
+        lambda browser, path=None, args=None: captured.update(browser=browser, args=args)
+        or {"app": browser, "launched": True},
+    )
+    result = asyncio.run(OpenUrlTool(launcher).execute(url="github.com"))
+    assert result.success
+    assert result.data["method"] == "browser"
+    assert result.data["browser"] == "chrome"
+    assert captured["args"] == ["https://github.com"]
+    assert launcher.last_launched_browser is None
+
+
+def test_open_url_ignores_stale_recent_browser(monkeypatch):
+    launcher = ApplicationLauncher()
+    launcher.last_launched_browser = "chrome"
+    launcher._last_browser_ts = time.monotonic() - 60.0
+    opened = {}
+    monkeypatch.setattr(
+        "app.skills.computer.tools.application._open_url_default",
+        lambda url: opened.update(url=url),
+    )
+    result = asyncio.run(OpenUrlTool(launcher).execute(url="youtube.com"))
+    assert result.success
+    assert result.data["browser"] == "default"
+    assert opened["url"] == "https://youtube.com"
+
+
+def test_open_url_dedupes_identical_url_within_window(monkeypatch):
+    called = []
+    monkeypatch.setattr(
+        "app.skills.computer.tools.application._open_url_default",
+        lambda url: called.append(url) or None,
+    )
+    tool = OpenUrlTool(ApplicationLauncher())
+    first = asyncio.run(tool.execute(url="https://github.com/okohii"))
+    second = asyncio.run(tool.execute(url="github.com/okohii"))
+    assert first.success and second.success
+    assert called == ["https://github.com/okohii"]
+    assert second.data.get("deduped") is True
+
+
+def test_open_url_not_deduped_after_window(monkeypatch):
+    called = []
+    monkeypatch.setattr(
+        "app.skills.computer.tools.application._open_url_default",
+        lambda url: called.append(url) or None,
+    )
+    tool = OpenUrlTool(ApplicationLauncher())
+    asyncio.run(tool.execute(url="github.com"))
+    tool._last_url_ts = time.monotonic() - 20.0
+    asyncio.run(tool.execute(url="github.com"))
+    assert called == ["https://github.com", "https://github.com"]
+
+
+def test_open_url_reports_default_browser_executable(monkeypatch):
+    opened = {}
+    monkeypatch.setattr(
+        "app.skills.computer.tools.application._open_url_default",
+        lambda url: opened.update(url=url) or "C:/apps/zen.exe",
+    )
+    result = asyncio.run(OpenUrlTool(ApplicationLauncher()).execute(url="github.com"))
+    assert result.success
+    assert result.data["method"] == "browser"
+    assert result.data["executable"] == "C:/apps/zen.exe"
+
+
+def test_parse_shell_exe_extracts_quoted_executable():
+    assert (
+        apps_module._parse_shell_exe(
+            '"C:\\Program Files\\Zen Browser\\zen.exe" --osint "%1"'
+        )
+        == "C:\\Program Files\\Zen Browser\\zen.exe"
+    )
+    assert (
+        apps_module._parse_shell_exe("C:\\Tools\\firefox.exe -osint")
+        == "C:\\Tools\\firefox.exe"
+    )
+    assert apps_module._parse_shell_exe("") == ""

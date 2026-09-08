@@ -63,7 +63,17 @@ def test_build_episode_memory_compact():
     )
     assert "abra o site do github" in episode
     assert "open_url" in episode
-    assert "site aberto no chrome" in episode
+    assert "site aberto no chrome" not in episode
+
+
+def test_build_episode_memory_never_stores_model_response():
+    episode = build_episode_memory(
+        "abra o linkedin",
+        "Você é uma pessoa, não entendeu? na verdade fui eu que abri",
+        ["open_url"],
+    )
+    assert "fui eu que abri" not in episode
+    assert "resultado" not in episode
 
 
 @pytest.mark.anyio

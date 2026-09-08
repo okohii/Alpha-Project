@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app.memory.service import MemoryService
+from app.skills.memory.tools.save import MemorySaveTool
 
 
 class FakeEmbeddingProvider:
@@ -71,3 +72,28 @@ async def test_memory_service_searches_memories():
 
     assert len(results) == 1
     assert results[0].content.startswith("Meu projeto")
+
+
+@pytest.mark.anyio
+async def test_memory_save_tool_persists_explicit_low_importance_content():
+    repository = FakeRepository()
+    service = MemoryService(repository, FakeEmbeddingProvider())
+    tool = MemorySaveTool(service)
+    result = await tool.execute(
+        content="meu perfil do github é https://github.com/okohii"
+    )
+
+    assert result.success
+    assert result.data["content"] == "meu perfil do github é https://github.com/okohii"
+    assert len(repository.items) == 1
+    assert repository.items[0].content.endswith("okohii")
+
+
+@pytest.mark.anyio
+async def test_memory_save_tool_rejects_empty_content():
+    service = MemoryService(FakeRepository(), FakeEmbeddingProvider())
+    tool = MemorySaveTool(service)
+
+    result = await tool.execute(content="   ")
+    assert not result.success
+    assert "conteúdo" in result.error

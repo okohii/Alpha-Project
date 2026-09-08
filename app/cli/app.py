@@ -326,7 +326,12 @@ def _print_agent_tools(agent: AgentCore) -> None:
 
     for event in agent.events:
         if event.type == EventType.tool_started:
-            print(f"[ferramenta] {event.payload.get('tool', '')} ...")
+            tool = event.payload.get("tool", "")
+            args = event.payload.get("arguments")
+            detail = ""
+            if isinstance(args, dict) and args:
+                detail = " -> " + json.dumps(args, ensure_ascii=False, default=str)
+            print(f"[ferramenta] {tool} ...{detail}")
         elif event.type == EventType.tool_finished and not event.payload.get("success", True):
             print(f"[erro na ferramenta] {event.payload.get('tool', '')}")
 

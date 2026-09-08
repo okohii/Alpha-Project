@@ -306,7 +306,10 @@ class AgentCore:
                         )
                         continue
                 started_at = time.perf_counter()
-                self._emit(EventType.tool_started, {"tool": tool.name})
+                self._emit(
+                    EventType.tool_started,
+                    {"tool": tool.name, "arguments": tool_call.arguments},
+                )
                 try:
                     result = await tool.execute(**tool_call.arguments)
                 except Exception as exc:

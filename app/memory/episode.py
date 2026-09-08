@@ -68,10 +68,15 @@ def build_episode_memory(
     tool_names: Iterable[str],
     max_len: int = 220,
 ) -> str:
-    """Constrói um episódio compacto: pedido, ações executadas e resultado."""
+    """Constrói um episódio com fatos verificáveis: pedido e ferramentas executadas.
+
+    A resposta do modelo NÃO é gravada: ela pode conter alegações não confirmadas
+    de ações (ex.: "perfil aberto"), que voltariam ao contexto como se fossem
+    fatos e alimentariam alucinações.
+    """
     tools = ", ".join(tool_names) if tool_names else "sem ferramentas"
     episode = (
         f"Episódio: usuário pediu \u201c{user_message[:max_len]}\u201d | "
-        f"ações: {tools} | resultado: \u201c{response[:max_len]}\u201d"
+        f"ações executadas: {tools}"
     )
     return episode

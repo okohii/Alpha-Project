@@ -70,6 +70,16 @@ class OllamaProvider:
             response = await client.get("/api/tags")
             return response.is_success
 
+    def _error_from_request(self, exc: httpx.RequestError) -> OllamaUnavailableError:
+        kind = "Tempo esgotado" if isinstance(exc, httpx.TimeoutException) else "Falha de conexão"
+        detail = (
+            f"O modelo {self.model} não respondeu dentro de {self.timeout:.0f}s."
+            " Pode estar carregando pela primeira vez ou com geração lenta."
+            if isinstance(exc, httpx.TimeoutException)
+            else f"Não foi possível falar com o Ollama em {self.base_url}."
+        )
+        return OllamaUnavailableError(f"{kind} ao gerar resposta. {detail} Tente de novo.")
+
     async def complete(
         self,
         messages: list[LLMMessage],
@@ -115,7 +125,9 @@ class OllamaProvider:
                     response.raise_for_status()
                 else:
                     raise
-            data = response.json()
+            except httpx.RequestError as exc:
+                raise self._error_from_request(exc) from exc
+        data = response.json()
         message = data.get("message", {})
         tool_calls = parse_tool_calls(message.get("tool_calls") or [])
         return LLMResponse(
@@ -162,25 +174,30 @@ class OllamaProvider:
         async def _iterate() -> Any:
             buffer: list[str] = []
             calls: list[ToolCall] = []
-            async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
-                async with client.stream("POST", "/api/chat", json=payload) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        try:
-                            line_data = json.loads(line)
-                        except ValueError:
-                            continue
-                        message = line_data.get("message") or {}
-                        content = message.get("content")
-                        if content:
-                            buffer.append(content)
-                            yield content
-                        if message.get("tool_calls"):
-                            calls = parse_tool_calls(message["tool_calls"])
-                        if line_data.get("done"):
-                            break
+            try:
+                async with httpx.AsyncClient(
+                    base_url=self.base_url, timeout=self.timeout
+                ) as client:
+                    async with client.stream("POST", "/api/chat", json=payload) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if not line:
+                                continue
+                            try:
+                                line_data = json.loads(line)
+                            except ValueError:
+                                continue
+                            message = line_data.get("message") or {}
+                            content = message.get("content")
+                            if content:
+                                buffer.append(content)
+                                yield content
+                            if message.get("tool_calls"):
+                                calls = parse_tool_calls(message["tool_calls"])
+                            if line_data.get("done"):
+                                break
+            except httpx.RequestError as exc:
+                raise self._error_from_request(exc) from exc
             streamed.content = "".join(buffer)
             streamed.tool_calls = calls or None
 
