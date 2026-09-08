@@ -3,12 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.llm.vision import OllamaVisionProvider
-from app.llm.vision_verify import get_vision_verifier
 from app.memory.service import MemoryService
-from app.tools.apps import ApplicationLauncher, ListAppsTool, OpenAppTool, OpenFileTool, OpenUrlTool
+from app.perception.vision import OllamaVisionProvider, get_vision_verifier
 from app.tools.base import Tool, ToolPermission, ToolResult
-from app.tools.browser_tools import (
+from app.tools.browser import (
     BrowserClickTool,
     BrowserHtmlTool,
     BrowserJsTool,
@@ -17,20 +15,32 @@ from app.tools.browser_tools import (
     BrowserTextTool,
     BrowserWaitTool,
 )
-from app.tools.calendar_tools import (
+from app.tools.calendar import (
     CalendarCreateTool,
     CalendarDeleteTool,
     CalendarListTool,
 )
-from app.tools.code import RunCodeTool, RunShellTool
-from app.tools.files import FileInfoTool, FileManager, FileReadTool, FileSearchTool, FileWriteTool
-from app.tools.gui import (
+from app.tools.computer import (
+    ApplicationLauncher,
+    ClickTextTool,
+    CloseAppTool,
+    DetectCameraTool,
+    ListAppsTool,
+    ListMonitorsTool,
     MouseClickTool,
     MouseScrollTool,
+    MoveAppTool,
+    OpenAppTool,
+    OpenFileTool,
+    OpenUrlTool,
     PressKeyTool,
+    ReadUiTool,
     ScreenshotTool,
+    TypeTextTool,
     VerifyScreenTool,
 )
+from app.tools.documents import DocumentSearchTool
+from app.tools.files import FileInfoTool, FileManager, FileReadTool, FileSearchTool, FileWriteTool
 from app.tools.memory import (
     MemoryDeleteTool,
     MemorySaveTool,
@@ -38,14 +48,11 @@ from app.tools.memory import (
     ProcedureRunTool,
     ProcedureSaveTool,
 )
-from app.tools.pc import CloseAppTool, TypeTextTool
 from app.tools.reminders import ReminderCreateTool, ReminderDeleteTool, ReminderListTool
-from app.tools.system import SystemConfigTool, SystemInfoTool
+from app.tools.shell import RunCodeTool, RunShellTool
+from app.tools.system import SystemConfigTool, SystemInfoTool, TimeTool
 from app.tools.tasks import TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool
-from app.tools.time import TimeTool
-from app.tools.uia import ClickTextTool, ReadUiTool
 from app.tools.web import DuckDuckGoHtmlSearchProvider, WebSearchTool
-from app.tools.windows import ListMonitorsTool, MoveAppTool
 
 
 class ToolNotFoundError(KeyError):
@@ -80,6 +87,7 @@ def build_default_tool_registry(
     task_service: Any | None = None,
     reminder_service: Any | None = None,
     calendar_service: Any | None = None,
+    document_indexer_factory: Any | None = None,
 ) -> ToolRegistry:
     file_manager = file_manager or FileManager()
     app_launcher = ApplicationLauncher()
@@ -94,6 +102,7 @@ def build_default_tool_registry(
         "list_apps": ListAppsTool(app_launcher),
         "run_code": RunCodeTool(file_manager),
         "run_shell": RunShellTool(file_manager),
+        "detect_camera": DetectCameraTool(),
         "browser_open": BrowserOpenTool(),
         "browser_text": BrowserTextTool(),
         "browser_html": BrowserHtmlTool(),
@@ -136,6 +145,8 @@ def build_default_tool_registry(
         tools["calendar_create"] = CalendarCreateTool(calendar_service)
         tools["calendar_list"] = CalendarListTool(calendar_service)
         tools["calendar_delete"] = CalendarDeleteTool(calendar_service)
+    if document_indexer_factory is not None:
+        tools["document_search"] = DocumentSearchTool(document_indexer_factory)
     return ToolRegistry(tools=tools)
 
 
@@ -146,6 +157,7 @@ def build_tool_registry(
     task_service: Any | None = None,
     reminder_service: Any | None = None,
     calendar_service: Any | None = None,
+    document_indexer_factory: Any | None = None,
 ) -> ToolRegistry:
     return build_default_tool_registry(
         file_manager=file_manager,
@@ -153,4 +165,5 @@ def build_tool_registry(
         task_service=task_service,
         reminder_service=reminder_service,
         calendar_service=calendar_service,
+        document_indexer_factory=document_indexer_factory,
     )

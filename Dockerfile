@@ -14,10 +14,11 @@ COPY pyproject.toml README.md /app/
 COPY app /app/app
 COPY alembic /app/alembic
 COPY scripts /app/scripts
-COPY frontend /app/frontend
 
 RUN pip install --upgrade pip && pip install -e .
 
+# A API REST continua disponível dentro do container (modo server).
+# Use `alpha` no host para a CLI interativa.
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

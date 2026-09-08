@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from app.core.config import get_settings
-from app.database.session import get_session
+from app.db.session import get_session
 from app.tasks.service import ManagedPathRepository
 
 router = APIRouter(tags=["settings"])

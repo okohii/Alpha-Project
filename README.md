@@ -14,8 +14,7 @@ O MVP inclui:
 - Gerenciamento de arquivos com diretórios autorizados
 - Sistema de documentos e indexação básica
 - Pipeline de voz com STT/TTS abstratos
-- Interface web simples para uso local
-- CLI completa (`alpha`) para interação sem frontend
+- **CLI terminal-first** (`alpha`): interface principal, com Rich, slash commands, streaming e eventos em tempo real
 - Testes automatizados em pytest
 
 ## Requisitos
@@ -39,19 +38,30 @@ O MVP inclui:
 ```text
 ALPHA/
 ├── app/
-│   ├── agent/
-│   ├── api/
-│   ├── core/
-│   ├── database/
+│   ├── agent/        # AgentCore, TaskEngine, router (fast path)
+│   ├── api/          # rotas FastAPI (chat, health, task, conversas, docs, memory)
+│   ├── calendar/
+│   ├── cli/          # interface `alpha` (app, renderer, commands, events, panels, themes)
+│   ├── core/         # config, eventos (EventBus), logging
+│   ├── db/           # session + models (users, conversations, memory, documents, tasks, ...)
 │   ├── documents/
-│   ├── llm/
+│   ├── llm/          # base + provedores (Gemini, Ollama, mock) + router/fallback
 │   ├── memory/
-│   ├── speech/
-│   ├── tools/
-│   └── main.py
-├── frontend/
+│   ├── perception/   # stt, wakeword, vision
+│   ├── reminders/
+│   ├── runtime/      # build_agent (application) + AgentContext (session)
+│   ├── security/     # PermissionManager + path policy
+│   ├── services/     # system (connectivity), browser (web search), health
+│   ├── skills/       # base + catálogo de skills por domínio
+│   ├── speech/       # audio I/O, cleaning, listener, pipeline, tts
+│   ├── tasks/        # TaskExecutorService + repositórios
+│   ├── tools/        # ferramentas por domínio (computer, files, web, ...)
+│   └── main.py       # app FastAPI (lifespan, rotas, health)
 ├── scripts/
 ├── tests/
+│   ├── unit/         # organizados por domínio (agent, cli, perception, tools, ...)
+│   └── integration/
+├── docs/
 ├── .env.example
 ├── docker-compose.yml
 ├── Dockerfile
@@ -63,14 +73,16 @@ ALPHA/
 ## Arquitetura resumida
 
 ```text
-[Frontend / Browser]
-        |
-        v
+[Terminal / CLI (alpha) ou API REST]
+                |
+                v
 [FastAPI API]
   |--- AgentCore
-  |--- LLM Router
+  |--- EventBus
+  |--- Skills + Tool Registry
+  |--- Task Engine
+  |--- Fast Path (intenções determinísticas sem LLM)
   |--- Memory Service
-  |--- Tool Registry
   |--- File Manager
   |--- Speech Pipeline
   |--- Web Search
@@ -79,6 +91,15 @@ ALPHA/
    +---- SQLite local (fallback)
    +---- PostgreSQL + pgvector (produção / Docker)
 ```
+
+## Camadas novas (terminal-first)
+
+- **`app/core/events.py`** — `EventBus` em processo: desacopla agente, task engine e código executável do que apenas observa (terminal, TTS, logs). Todos os eventos têm `type`, `payload` e `duration_ms`.
+- **`app/agent/task.py` / `app/agent/state.py`** — `TaskEngine` e `Task` com estados explícitos (`running`, `waiting_confirmation`, `waiting_input`, `completed`, `failed`, `cancelled`), passos medidos e token de cancelamento.
+- **`app/agent/router.py`** — `FastPathRouter`: intenções simples e recorrentes (abrir app/navegador/pasta, fechar app, ler arquivo, pesquisar web, lembrar, hora, print) resolvidas por regex, sem passar pelo LLM.
+- **`app/security/`** — níveis `low`/`medium`/`high`, `PermissionManager` e path policy; autorização não é delegada ao LLM.
+- **`app/skills/`** — `SkillRegistry` + catálogo (Browser, Files, Documents, Computer, Memory, Web, Tasks, System): as ferramentas são carregadas por skill sob demanda, em vez de todas irem sempre ao LLM.
+- **`app/cli/`** — `TerminalRenderer` (Rich) e slash commands tratados localmente jamais passados ao LLM.
 
 ## 1) Clonar e preparar o ambiente
 
@@ -157,10 +178,10 @@ DATABASE_URL=postgresql+asyncpg://ALPHA:ALPHA@localhost:5432/ALPHA
 
 ## 3) Usar a CLI `alpha`
 
-Depois de instalar o pacote (`python -m pip install -e .`), o comando `alpha` fica disponível e cobre os fluxos principais sem precisar do frontend. Use `--json` em qualquer nível para saída estruturada.
+Depois de instalar o pacote (`python -m pip install -e .`), o comando `alpha` fica disponível e é a **interface principal** do agente. Use `--json` em qualquer nível para saída estruturada.
 
 ```bash
-alpha                             # inicia direto na conversa interativa
+alpha                             # inicia direto na conversa interativa (terminal-first)
 alpha --help                      # lista os comandos
 alpha health                      # status dos serviços (banco, Ollama, STT/TTS, web)
 alpha settings --json             # configurações ativas
@@ -172,9 +193,32 @@ alpha chat --no-voice "procurando"# mensagem única sem falar a resposta
 alpha chat --conversation-id <id> "continuação"
 ```
 
-No modo de voz padrão, o ALPHA fica em escuta contínua e conversa de forma fluida, igual ao modo assistente/Alexa do frontend: você fala, ele transcreve (ao notar silêncio), responde em voz e continua ouvindo. Para encerrar, diga "sair" ou pressione `Ctrl+C`.
+### Comandos de barra na conversa interativa
 
-A voz é ativada por padrão quando `STT_ENABLED` e `TTS_ENABLED` estão ligados. Use `alpha chat --no-voice` para uma sessão só de texto com os comandos `/sair` e `/q`.
+Todos os comandos com `/` são tratados localmente (nunca enviados ao LLM):
+
+| Comando | Efeito |
+| --- | --- |
+| `/help` | ajuda por categoria |
+| `/exit` (`/q`, `/sair`) | encerra a sessão |
+| `/clear` | limpa o terminal |
+| `/status` | modelo, modo, verbosity, tarefa ativa, tools |
+| `/model [nome]` | mostra/altera o modelo do Ollama |
+| `/config` | mostra as configurações ativas |
+| `/permissions` | lista diretórios permitidos e política |
+| `/skills` | lista skills disponíveis |
+| `/tools` | lista ferramentas registradas |
+| `/memory` | memórias recentes |
+| `/tasks` / `/task <id>` | tarefas recentes / detalhe |
+| `/cancel` (`/stop`) | cancela a execução em andamento |
+| `/verbosity [level]` | `quiet` \| `normal` \| `verbose` \| `debug` |
+| `/debug` | alterna para verbosity `debug` |
+
+A resposta do agente é transmitida **token a token** no terminal (quando o provider suporta streaming), e cada ferramenta/skill emite eventos reais de progresso — sem indicadores falsos. `quiet` suprime progresso; `verbose`/`debug` mostram detalhes e durações.
+
+No modo de voz padrão, o ALPHA fica em escuta contínua e conversa de forma fluida (Estilo assistente): você fala, ele transcreve (ao notar silêncio), responde em voz e continua ouvindo. Para encerrar, diga "sair" ou pressione `Ctrl+C`.
+
+A voz é ativada por padrão quando `STT_ENABLED` e `TTS_ENABLED` estão ligados. Use `alpha chat --no-voice` para uma sessão só de texto.
 
 ### STT direto na CLI
 
@@ -232,9 +276,9 @@ No Windows:
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Depois, abra:
+Depois, use a CLI como interface principal (`alpha`) ou acesse a API diretamente:
 
-- http://127.0.0.1:8000
+- http://127.0.0.1:8000/docs (OpenAPI)
 - http://127.0.0.1:8000/health
 - http://127.0.0.1:8000/settings
 
@@ -387,7 +431,7 @@ pytest tests/integration -q
 ### Rodar teste específico
 
 ```bash
-pytest tests/unit/test_memory.py -q
+pytest tests/unit/memory/test_memory.py -q
 ```
 
 ### Rodar com relatório mais detalhado
@@ -428,8 +472,8 @@ curl http://127.0.0.1:8000/health/llm
 
 ```bash
 python - <<'PY'
-from app.database.session import initialize_database
 import asyncio
+from app.db.session import initialize_database
 
 async def main():
     await initialize_database()
@@ -638,23 +682,11 @@ pytest -q
 
 ## 14) Roadmap de evolução
 
+- Descoberta/skills sob demanda já em andamento (carga de tools por skill)
+- Executor multi-etapas com foco em verificação (OBSERVE → DECIDE → ACT → VERIFY)
+- Percepção de GUI estruturada (access tree > DOM > OCR > visão) e fallback visão
+- Otimização de contexto (memória e tools relevantes por turno)
+- Streaming/confirmação/cancelamento são a base atual já funcional
 - Wake word
 - Streaming de TTS
-- Aplicativo desktop
-- Aplicativo mobile
-- Inbox de notificações
-- Agentes especializados
 - Automação local e remota
-
-## 15) Observações finais
-
-Este README foi escrito para facilitar a execução real do projeto em múltiplos cenários:
-
-- ambiente virtual
-- execução direta com uvicorn
-- Docker Compose
-- pytest em unidade/integracão
-- validação manual via curl e Python
-- fallback local sem dependências pesadas
-
-Se quiser, posso também criar uma versão mais enxuta em um arquivo `README-QUICKSTART.md` e uma outra versionada para desenvolvimento avançado com PostgreSQL/Ollama.

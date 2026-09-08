@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,11 +11,11 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.config import get_settings
-from app.core.events import EventType, SystemEvent
-from app.core.security import AccessDeniedError
+from app.core.events import EventBus, EventType, SystemEvent
 from app.llm.base import LLMMessage, LLMProvider, LLMResponse
 from app.llm.router import FaultTolerantProvider, LLMRouter
 from app.memory.service import MemoryService
+from app.security import AccessDeniedError
 from app.tools.base import ToolPermission, ToolResult
 from app.tools.registry import ToolRegistry
 
@@ -38,6 +40,8 @@ class AgentCore:
         permission_request_handler: Callable[[str], Awaitable[bool]] | None = None,
         allowed_directories_resolver: Callable[[], list[str]] | None = None,
         db_session: Any | None = None,
+        event_bus: EventBus | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> None:
         self.llm_router = llm_router
         self.tool_registry = tool_registry
@@ -51,14 +55,114 @@ class AgentCore:
         self.db_session = db_session
         self.events: list[SystemEvent] = []
         self._tools_used: list[str] = []
+        self.event_bus = event_bus
+        self.cancel_event = cancel_event
+
+    def _emit(
+        self,
+        event_type: EventType,
+        payload: dict[str, Any] | None = None,
+        duration_ms: int | None = None,
+    ) -> SystemEvent:
+        event = SystemEvent(
+            type=event_type, payload=dict(payload or {}), duration_ms=duration_ms
+        )
+        self.events.append(event)
+        if self.event_bus is not None:
+            self.event_bus.emit(event_type, event.payload, duration_ms)
+        return event
+
+    def _is_cancelled(self) -> bool:
+        return self.cancel_event is not None and self.cancel_event.is_set()
+
+    def _raise_if_cancelled(self) -> None:
+        if self._is_cancelled():
+            self._emit(EventType.agent_cancelled)
+            raise asyncio.CancelledError()
 
     async def chat(self, message: str, conversation_id: str | None = None) -> dict[str, Any]:
+        started_at = time.perf_counter()
         conversation_id = conversation_id or str(uuid4())
         self._tools_used = []
-        self.events.append(
-            SystemEvent(type=EventType.user_message, payload={"conversation_id": conversation_id})
+        self._emit(EventType.user_message, {"conversation_id": conversation_id})
+        self._emit(EventType.agent_started, {"conversation_id": conversation_id})
+        try:
+            result = await self._chat_impl(message, conversation_id)
+            self._emit(
+                EventType.agent_finished,
+                {"conversation_id": conversation_id},
+                duration_ms=_duration_ms(started_at),
+            )
+            return result
+        except asyncio.CancelledError:
+            self._emit(
+                EventType.agent_cancelled,
+                {"conversation_id": conversation_id},
+                duration_ms=_duration_ms(started_at),
+            )
+            raise
+        except Exception as exc:
+            self._emit(
+                EventType.agent_failed,
+                {"error": str(exc)},
+                duration_ms=_duration_ms(started_at),
+            )
+            raise
+
+    async def chat_stream(
+        self,
+        message: str,
+        conversation_id: str | None = None,
+    ) -> Any:
+        """Processa a mensagem emitindo cada ``SystemEvent`` em tempo real.
+
+        Yield dos eventos conforme ocorrem; o turno final do assistente é
+        transmitido token a token (``EventType.token_stream``) quando o
+        provider suporta streaming. Ao final entrega o mesmo dicionário
+        de ``chat``.
+        """
+        conversation_id = conversation_id or str(uuid4())
+        self._tools_used = []
+        if self.event_bus is None:
+            result = await self.chat(message, conversation_id)
+            yield SystemEvent(
+                type=EventType.assistant_message,
+                payload={"content": result["response"]},
+            )
+            return
+
+        queue: asyncio.Queue[SystemEvent] = asyncio.Queue()
+        unsubscribe = self.event_bus.subscribe_all(
+            lambda event: queue.put_nowait(event)
         )
 
+        async def _task_fn() -> dict[str, Any]:
+            return await self._chat_impl(message, conversation_id, stream_tokens=True)
+
+        task = asyncio.create_task(_task_fn())
+        try:
+            while True:
+                try:
+                    event = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    if task.done():
+                        break
+                    event = await queue.get()
+                yield event
+            await task
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        finally:
+            unsubscribe()
+
+    async def _chat_impl(
+        self,
+        message: str,
+        conversation_id: str,
+        stream_tokens: bool = False,
+    ) -> dict[str, Any]:
+        conversation_id = conversation_id or str(uuid4())
         history: list[LLMMessage] = []
         if self.db_session is not None:
             await self._ensure_conversation(conversation_id, message)
@@ -75,6 +179,15 @@ class AgentCore:
                 if self._memory_context_line(memory)
             ]
 
+        profile_context: list[str] = []
+        if self.memory_service is not None:
+            profile = await self.memory_service.load_profile()
+            profile_context = [
+                self._memory_context_line(memory)
+                for memory in profile
+                if self._memory_context_line(memory)
+            ]
+
         provider = self.llm_router.choose(message)
         # Build provider metadata for the response
         provider_class = provider.__class__.__name__
@@ -88,6 +201,17 @@ class AgentCore:
             provider_base = getattr(cloud, "base_url", None) or getattr(local, "base_url", None)
         system_prompt = self._build_system_prompt()
         messages = [LLMMessage(role="system", content=system_prompt)]
+        if profile_context:
+            messages.append(
+                LLMMessage(
+                    role="system",
+                    content=(
+                        "Perfil consolidado do usuário (fatos estáveis, use como referência "
+                        "de quem ele é e como ele opera):\n- "
+                        + "\n- ".join(profile_context)
+                    ),
+                )
+            )
         if memory_context:
             messages.append(
                 LLMMessage(
@@ -102,8 +226,14 @@ class AgentCore:
         messages.extend(history)
         messages.append(LLMMessage(role="user", content=message))
 
-        permissions = {ToolPermission.read, ToolPermission.write}
-        response = await self._run_agent_loop(provider, messages, permissions, conversation_id)
+        permissions = {
+            ToolPermission.read,
+            ToolPermission.write,
+            ToolPermission.sensitive,
+        }
+        response = await self._run_agent_loop(
+            provider, messages, permissions, conversation_id, stream_tokens=stream_tokens
+        )
 
         if self.db_session is not None:
             await self._save_message(conversation_id, "user", message)
@@ -116,10 +246,8 @@ class AgentCore:
             )
             memory_created = saved is not None
             if memory_created:
-                self.events.append(
-                    SystemEvent(
-                        type=EventType.memory_created, payload={"conversation_id": conversation_id}
-                    )
+                self._emit(
+                    EventType.memory_created, {"conversation_id": conversation_id}
                 )
 
         return {
@@ -140,19 +268,45 @@ class AgentCore:
         messages: list[LLMMessage],
         permissions: set[ToolPermission],
         conversation_id: str | None = None,
+        stream_tokens: bool = False,
     ) -> LLMResponse:
         allowed_tools = self.tool_registry.schemas(permissions)
-        last_response = await provider.complete(messages, tools=allowed_tools)
+        last_response = await self._provider_turn(provider, messages, allowed_tools, stream_tokens)
         iterations = 0
         while last_response.tool_calls and iterations < self.settings.agent_max_tool_iterations:
+            self._raise_if_cancelled()
             tool_messages = []
             for tool_call in last_response.tool_calls:
                 tool = self.tool_registry.get(tool_call.name)
                 if tool.permission not in permissions:
                     continue
-                self.events.append(
-                    SystemEvent(type=EventType.tool_started, payload={"tool": tool.name})
-                )
+                if tool.permission is ToolPermission.sensitive:
+                    confirmed = await self._confirm_sensitive(tool.name, tool_call.arguments)
+                    if not confirmed:
+                        denied_at = time.perf_counter()
+                        self._emit(
+                            EventType.tool_finished,
+                            {"tool": tool.name, "success": False},
+                            duration_ms=_duration_ms(denied_at),
+                        )
+                        tool_messages.append(
+                            LLMMessage(
+                                role="tool",
+                                content=json.dumps(
+                                    {
+                                        "type": "function_response",
+                                        "name": tool.name,
+                                        "success": False,
+                                        "response": {},
+                                        "error": "Uso negado pelo usuário (ferramenta sensível).",
+                                    },
+                                    default=str,
+                                ),
+                            )
+                        )
+                        continue
+                started_at = time.perf_counter()
+                self._emit(EventType.tool_started, {"tool": tool.name})
                 try:
                     result = await tool.execute(**tool_call.arguments)
                 except Exception as exc:
@@ -169,18 +323,11 @@ class AgentCore:
                 ):
                     granted = await self._request_permission(result.error.candidate)
                     if granted:
-                        self.events.append(
-                            SystemEvent(
-                                type=EventType.tool_finished,
-                                payload={"tool": tool.name, "success": True},
-                            )
-                        )
                         result = await tool.execute(**tool_call.arguments)
-                self.events.append(
-                    SystemEvent(
-                        type=EventType.tool_finished,
-                        payload={"tool": tool.name, "success": result.success},
-                    )
+                self._emit(
+                    EventType.tool_finished,
+                    {"tool": tool.name, "success": result.success},
+                    duration_ms=_duration_ms(started_at),
                 )
                 self._tools_used.append(tool.name)
                 await self._record_tool_execution(
@@ -205,14 +352,40 @@ class AgentCore:
                 )
             messages.extend(tool_messages)
             messages[0] = LLMMessage(role="system", content=self._build_system_prompt())
-            last_response = await provider.complete(messages, tools=allowed_tools)
-            iterations += 1
-        self.events.append(
-            SystemEvent(
-                type=EventType.assistant_message, payload={"preview": last_response.content[:120]}
+            last_response = await self._provider_turn(
+                provider, messages, allowed_tools, stream_tokens
             )
+            iterations += 1
+        self._emit(
+            EventType.assistant_message,
+            payload={"preview": last_response.content[:120], "content": last_response.content},
         )
         return last_response
+
+    async def _provider_turn(
+        self,
+        provider: LLMProvider,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]],
+        stream_tokens: bool,
+    ) -> LLMResponse:
+        """Chama o provedor, transmitindo tokens quando ``stream_tokens``.
+
+        Provedores sem suporte a streaming caem de volta para ``complete``.
+        """
+        stream_turn = getattr(provider, "stream_turn", None)
+        if stream_tokens and callable(stream_turn):
+            streamed = await stream_turn(messages, tools)
+            buffer: list[str] = []
+            async for token in streamed:
+                buffer.append(token)
+                self._emit(EventType.token_stream, {"token": token})
+            return LLMResponse(
+                content="".join(buffer),
+                tool_calls=streamed.tool_calls,
+                raw=None,
+            )
+        return await provider.complete(messages, tools=tools)
 
     async def _request_permission(self, candidate: str) -> bool:
         if self.permission_request_handler is None:
@@ -222,9 +395,36 @@ class AgentCore:
         except Exception:
             return False
 
+    async def _confirm_sensitive(self, tool_name: str, arguments: dict) -> bool:
+        """Pede confirmação antes de executar ferramenta sensível quando há handler.
+
+        Sem handler (ex.: API), a ferramenta é executada diretamente para que a
+        automação continue funcionando mesmo sem interface de confirmação.
+        """
+        if self.permission_request_handler is None:
+            return True
+        candidate = f"{tool_name}: {json.dumps(arguments, ensure_ascii=False, default=str)}"
+        started_at = time.perf_counter()
+        self._emit(
+            EventType.waiting_confirmation,
+            {
+                "tool": tool_name,
+                "arguments": arguments,
+                "message": f"Confirma o uso de {tool_name}?",
+            },
+        )
+        try:
+            return await self._request_permission(candidate)
+        finally:
+            self._emit(
+                EventType.waiting_confirmation_end,
+                {"tool": tool_name},
+                duration_ms=_duration_ms(started_at),
+            )
+
     async def _ensure_conversation(self, conversation_id: str, first_message: str) -> None:
         try:
-            from app.database.models import Conversation
+            from app.db.models import Conversation
 
             existing = await self.db_session.get(Conversation, conversation_id)
             if existing is None:
@@ -239,7 +439,7 @@ class AgentCore:
         try:
             from sqlalchemy import select
 
-            from app.database.models import Message
+            from app.db.models import Message
 
             result = await self.db_session.execute(
                 select(Message)
@@ -259,7 +459,7 @@ class AgentCore:
         if not content and role == "assistant":
             return
         try:
-            from app.database.models import Message
+            from app.db.models import Message
 
             self.db_session.add(
                 Message(
@@ -284,7 +484,7 @@ class AgentCore:
         if self.db_session is None:
             return
         try:
-            from app.database.models import ToolExecution
+            from app.db.models import ToolExecution
 
             self.db_session.add(
                 ToolExecution(
@@ -346,3 +546,7 @@ class AgentCore:
         if prompt_path.exists():
             return prompt_path.read_text(encoding="utf-8")
         return "Você é o ALPHA."
+
+
+def _duration_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from app.database.models import ReminderRecord
+from app.db.models import ReminderRecord
 
 logger = logging.getLogger("app.reminders.service")
 

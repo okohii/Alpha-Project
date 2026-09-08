@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from app.database.session import get_session
+from app.db.session import get_session
 from app.memory.embeddings import LocalEmbeddingProvider
 from app.memory.repository import MemoryRepository
 from app.memory.service import MemoryService

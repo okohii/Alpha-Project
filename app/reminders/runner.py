@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from app.database.models import SystemEventRecord
+from app.db.models import SystemEventRecord
 from app.reminders.service import SAFE_ACTIONS, ReminderRepository, ReminderService
 from app.tasks.service import ManagedPathRepository, TaskExecutorService, TaskRepository
 from app.tools.files import FileManager

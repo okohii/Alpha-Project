@@ -2,6 +2,24 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+PROFILE_MARKERS = (
+    "eu sou",
+    "meu nome",
+    "me chamo",
+    "sou o",
+    "sou a",
+    "trabalho com",
+    "sou desenvolvedor",
+    "sou dev",
+    "sou programador",
+    "eu trabalho",
+    "meu computador",
+    "minha máquina",
+    "uso windows",
+    "sistema operacional",
+    "me apresento",
+)
+
 PREFERENCE_MARKERS = (
     "sempre",
     "nunca",
@@ -33,10 +51,12 @@ PROCEDURE_MARKERS = (
 
 
 def detect_kind(content: str) -> str:
-    """Classifica o texto em procedimento, preferencia ou semantic."""
+    """Classifica o texto em perfil, procedimento, preferencia ou semantic."""
     lowered = content.lower()
     if any(marker in lowered for marker in PROCEDURE_MARKERS):
         return "procedimento"
+    if any(marker in lowered for marker in PROFILE_MARKERS):
+        return "perfil"
     if any(marker in lowered for marker in PREFERENCE_MARKERS):
         return "preferencia"
     return "semantic"

@@ -3,8 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from app.agent.factory import build_agent
-from app.database.session import get_session
+from app.db.session import get_session
+from app.runtime import build_agent
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 

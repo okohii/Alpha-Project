@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
-import json
 
 import httpx
 
@@ -10,6 +10,8 @@ from app.core.config import get_settings
 from app.llm.base import LLMMessage, LLMResponse, ToolCall
 
 logger = logging.getLogger("app.llm.gemini")
+
+_FUNC_CALL_KEYS = ("function_call", "functionCall", "tool_call", "toolCall", "toolCallRequest")
 
 
 class GeminiAPIError(RuntimeError):
@@ -75,8 +77,8 @@ class GeminiProvider:
                 if parsed and parsed.get("type") == "function_response":
                     name = parsed.get("name")
                     response_payload = parsed.get("response", {})
-                    # Gemini endpoint does not accept role 'tool' in contents; use 'assistant' role
-                    # and include a structured function_response object. This avoids "Role 'tool' is not supported" errors.
+# Gemini endpoint does not accept role 'tool' in contents; use 'assistant' role and
+# include a structured function_response object. This avoids "'tool' role not supported".
                     contents.append(
                         {
                             "role": "assistant",
@@ -248,14 +250,14 @@ class GeminiProvider:
         func_call = None
 
         # Candidate-level keys
-        for key in ("function_call", "functionCall", "tool_call", "toolCall", "toolCallRequest"):
+        for key in _FUNC_CALL_KEYS:
             if key in candidate:
                 func_call = candidate[key]
                 break
 
         # Content-level keys
         if not func_call and isinstance(content, dict):
-            for key in ("function_call", "functionCall", "tool_call", "toolCall", "toolCallRequest"):
+            for key in _FUNC_CALL_KEYS:
                 if key in content:
                     func_call = content[key]
                     break
@@ -264,7 +266,7 @@ class GeminiProvider:
         if not func_call and isinstance(parts, list):
             for part in parts:
                 if isinstance(part, dict):
-                    for key in ("function_call", "functionCall", "tool_call", "toolCall", "toolCallRequest"):
+                    for key in _FUNC_CALL_KEYS:
                         if key in part:
                             func_call = part[key]
                             break
@@ -274,7 +276,12 @@ class GeminiProvider:
         if func_call:
             # normalize function call shape
             name = func_call.get("name") or func_call.get("function") or func_call.get("tool")
-            args = func_call.get("arguments") or func_call.get("args") or func_call.get("parameters") or {}
+            args = (
+                func_call.get("arguments")
+                or func_call.get("args")
+                or func_call.get("parameters")
+                or {}
+            )
             # arguments may be a JSON string
             if isinstance(args, str):
                 try:
@@ -285,7 +292,9 @@ class GeminiProvider:
 
             logger.debug("Gemini requested function call: %s args=%s", name, args)
 
-            return LLMResponse(content="", tool_calls=[ToolCall(name=name, arguments=args)], raw=data)
+            return LLMResponse(
+                content="", tool_calls=[ToolCall(name=name, arguments=args)], raw=data
+            )
 
         text_parts: list[str] = []
 

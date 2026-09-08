@@ -5,7 +5,7 @@ import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import get_settings
-from app.database.models import Base
+from app.db.models import Base
 
 
 async def main() -> None:

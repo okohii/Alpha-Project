@@ -69,11 +69,6 @@ Thumbs.db
 *.log
 logs/
 
-# Frontend build (if applicable)
-frontend/node_modules/
-frontend/dist/
-frontend/build/
-
 # Misc
 *.bak
 *.tmp

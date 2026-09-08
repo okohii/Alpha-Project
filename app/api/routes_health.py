@@ -2,30 +2,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.core.config import get_settings
 from app.llm.ollama import OllamaProvider
+from app.services.health import collect_health
 
 router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
 async def health() -> dict:
-    settings = get_settings()
-    ollama_status = "unknown"
-    try:
-        ollama_status = "ok" if await OllamaProvider().health() else "down"
-    except Exception:
-        ollama_status = "down"
-    return {
-        "status": "ok",
-        "services": {
-            "database": "ok",
-            "ollama": ollama_status,
-            "stt": "ok" if settings.stt_enabled else "disabled",
-            "tts": "ok" if settings.tts_enabled else "disabled",
-            "web": "available" if settings.allow_web else "disabled",
-        },
-    }
+    return await collect_health()
 
 
 @router.get("/health/llm")

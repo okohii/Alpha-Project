@@ -27,10 +27,13 @@ dependencies = [
   "pypdf>=5.0,<6.0",
   "python-docx>=1.1,<2.0",
   "croniter>=2.0,<3.0",
+  "rich>=13.7,<16.0",
   "pytest>=8.2,<9.0",
   "pytest-asyncio>=0.23,<1.0",
   "anyio>=4.4,<5.0",
   "pywinauto>=0.6.8,<1.0; platform_system=='Windows'",
+  "ultralytics>=8.2,<9.0",
+  "opencv-python>=4.9,<5.0",
 ]
 
 [project.optional-dependencies]
@@ -54,3 +57,6 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/api/*.py" = ["B008"]

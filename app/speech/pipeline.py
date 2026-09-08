@@ -3,13 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from app.perception.stt import FasterWhisperSTT
 from app.speech.listener import AudioListener, PushToTalkAudioListener
-from app.speech.stt import FasterWhisperSTT, SpeechToTextError
 from app.speech.tts import PiperTTS, TextToSpeechError
 
 
 class VoicePipeline:
-    def __init__(self, listener: AudioListener | None = None, stt: FasterWhisperSTT | None = None, tts: PiperTTS | None = None) -> None:
+    def __init__(
+        self,
+        listener: AudioListener | None = None,
+        stt: FasterWhisperSTT | None = None,
+        tts: PiperTTS | None = None,
+    ) -> None:
         self.listener = listener or PushToTalkAudioListener()
         self.stt = stt or FasterWhisperSTT()
         self.tts = tts or PiperTTS()
@@ -18,7 +23,11 @@ class VoicePipeline:
         await self.listener.start()
         try:
             transcription = await self.stt.transcribe(audio_path)
-            return {"transcription": transcription.text, "language": transcription.language, "segments": transcription.segments}
+            return {
+                "transcription": transcription.text,
+                "language": transcription.language,
+                "segments": transcription.segments,
+            }
         finally:
             await self.listener.stop()
 

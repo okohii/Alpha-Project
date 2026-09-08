@@ -2,11 +2,26 @@ from __future__ import annotations
 
 from pathlib import Path
 
+_TEXT_SUFFIXES = {
+    ".txt",
+    ".md",
+    ".py",
+    ".json",
+    ".csv",
+    ".js",
+    ".ts",
+    ".html",
+    ".css",
+    ".yaml",
+    ".yml",
+    ".xml",
+}
+
 
 class DocumentParser:
     def extract_text(self, path: Path) -> str:
         suffix = path.suffix.lower()
-        if suffix in {".txt", ".md", ".py", ".json", ".csv", ".js", ".ts", ".html", ".css", ".yaml", ".yml", ".xml"}:
+        if suffix in _TEXT_SUFFIXES:
             return path.read_text(encoding="utf-8", errors="ignore")
         if suffix == ".pdf":
             try:

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 from app.core.config import get_settings
-from app.database.models import Memory as MemoryModel
+from app.db.models import Memory as MemoryModel
 from app.memory.embeddings import EmbeddingProvider
 from app.memory.episode import build_episode_memory, detect_kind
 from app.memory.repository import MemoryRepository
@@ -45,14 +45,14 @@ class MemoryService:
         self.settings = get_settings()
 
     def score_importance(self, content: str) -> float:
-        keywords = ["projeto", "senha", "postgresql", "atlas", "prefer", "importante"]
+        keywords = ["projeto", "prefer", "importante", "lembre", "memorize", "regra"]
         score = 0.15
         lowered = content.lower()
         if any(keyword in lowered for keyword in keywords):
             score += 0.5
         if len(content) > 120:
             score += 0.2
-        if "memorize" in lowered or "memorize que" in lowered:
+        if "memorize que" in lowered:
             score = 1.0
         return min(score, 1.0)
 
@@ -65,7 +65,9 @@ class MemoryService:
         metadata: dict[str, Any] | None = None,
         persist_if_relevant: bool = True,
     ) -> MemoryItem | None:
-        resolved_importance = importance if importance is not None else self.score_importance(content)
+        resolved_importance = (
+            importance if importance is not None else self.score_importance(content)
+        )
         if persist_if_relevant and resolved_importance < self.settings.memory_min_importance:
             return None
         embedding = await self.embedding_provider.embed(content)
@@ -77,8 +79,8 @@ class MemoryService:
             importance=resolved_importance,
             embedding=embedding,
             metadata_=metadata or {},
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
         )
         saved = await self.repository.save(row)
         return self._to_item(saved)
@@ -98,6 +100,8 @@ class MemoryService:
         """
         memory_type = detect_kind(user_message or "")
         tool_names = tool_names or []
+        if memory_type == "perfil":
+            return await self.save_profile(user_message.strip())
         if memory_type == "preferencia":
             importance = 1.0
         elif tool_names:
@@ -117,9 +121,35 @@ class MemoryService:
         memories = await self.repository.list(limit=limit)
         return [self._to_item(memory) for memory in memories]
 
+    async def save_profile(self, content: str) -> MemoryItem | None:
+        """Grava um fato estável sobre o usuário (identidade, ambiente, preferências duradouras).
+
+        Perfis têm memória_type 'perfil' e importância máxima; são sempre
+        injetados no contexto do agente, independente da consulta atual.
+        """
+        return await self.save_memory(
+            content=content,
+            memory_type="perfil",
+            source="profile",
+            importance=1.0,
+            metadata={"kind": "perfil", "profile": True},
+        )
+
+    async def load_profile(self, limit: int = 50) -> list[MemoryItem]:
+        """Retorna os registros de perfil (identidade do usuário e do agente)."""
+        memories = await self.repository.list(limit=limit)
+        profile = [
+            self._to_item(memory)
+            for memory in memories
+            if memory.memory_type == "perfil" or (memory.metadata_ or {}).get("profile")
+        ]
+        return profile[:limit]
+
     async def search_memories(self, query: str, limit: int = 5) -> list[MemoryItem]:
         embedding = await self.embedding_provider.embed(query)
-        memories = await self.repository.search_by_embedding(embedding, limit=limit)
+        memories = await self.repository.search_by_embedding(
+            embedding, limit=limit, keyword=query
+        )
         return [self._to_item(memory) for memory in memories]
 
     async def delete_memory(self, memory_id: str) -> None:

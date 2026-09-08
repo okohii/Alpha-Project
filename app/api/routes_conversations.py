@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.database.models import Conversation
-from app.database.session import get_session
+from app.db.models import Conversation
+from app.db.session import get_session
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -19,7 +19,7 @@ async def list_conversations(session=Depends(get_session)) -> list[dict]:
     conversations: list[object] = []
     try:
         if hasattr(session, "conversations"):
-            conversations = list(getattr(session, "conversations"))
+            conversations = list(session.conversations)
         else:
             query = select(Conversation)
             created_at_field = getattr(Conversation, "created_at", None)
@@ -54,7 +54,9 @@ async def get_conversation(conversation_id: str, session=Depends(get_session)) -
 
 
 @router.post("")
-async def create_conversation(payload: ConversationCreateRequest, session=Depends(get_session)) -> dict:
+async def create_conversation(
+    payload: ConversationCreateRequest, session=Depends(get_session)
+) -> dict:
     conversation = Conversation(title=payload.title)
     session.add(conversation)
     await session.commit()

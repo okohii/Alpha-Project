@@ -106,12 +106,12 @@ class PiperTTS(TextToSpeech):
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=f"{text}\n".encode("utf-8")),
+                process.communicate(input=f"{text}\n".encode()),
                 timeout=30,
             )
         except FileNotFoundError as exc:
             raise TextToSpeechError("Piper não instalado") from exc
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             if "process" in locals():
                 process.kill()
                 await process.wait()
@@ -121,7 +121,8 @@ class PiperTTS(TextToSpeech):
 
         if process.returncode != 0:
             output = (stderr or stdout or b"").decode("utf-8", errors="replace").strip()
-            raise TextToSpeechError(f"Falha no Piper: {output or 'código de saída ' + str(process.returncode)}")
+            message = output or "código de saída " + str(process.returncode)
+            raise TextToSpeechError(f"Falha no Piper: {message}")
 
         if not output_path.exists():
             raise TextToSpeechError("Piper não gerou áudio")
