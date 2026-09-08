@@ -8,8 +8,8 @@ from typing import Any
 
 from app.db.models import SystemEventRecord
 from app.reminders.service import SAFE_ACTIONS, ReminderRepository, ReminderService
+from app.skills.files.service import FileManager
 from app.tasks.service import ManagedPathRepository, TaskExecutorService, TaskRepository
-from app.tools.files import FileManager
 from app.tools.registry import build_default_tool_registry
 
 logger = logging.getLogger("app.reminders.runner")

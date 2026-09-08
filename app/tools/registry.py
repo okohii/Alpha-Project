@@ -5,8 +5,7 @@ from typing import Any
 
 from app.memory.service import MemoryService
 from app.perception.vision import OllamaVisionProvider, get_vision_verifier
-from app.tools.base import Tool, ToolPermission, ToolResult
-from app.tools.browser import (
+from app.skills.browser import (
     BrowserClickTool,
     BrowserHtmlTool,
     BrowserJsTool,
@@ -15,12 +14,8 @@ from app.tools.browser import (
     BrowserTextTool,
     BrowserWaitTool,
 )
-from app.tools.calendar import (
-    CalendarCreateTool,
-    CalendarDeleteTool,
-    CalendarListTool,
-)
-from app.tools.computer import (
+from app.skills.calendar import CalendarCreateTool, CalendarDeleteTool, CalendarListTool
+from app.skills.computer import (
     ApplicationLauncher,
     ClickTextTool,
     CloseAppTool,
@@ -39,24 +34,22 @@ from app.tools.computer import (
     TypeTextTool,
     VerifyScreenTool,
 )
-from app.tools.documents import DocumentSearchTool
-from app.tools.files import FileInfoTool, FileManager, FileReadTool, FileSearchTool, FileWriteTool
-from app.tools.memory import (
+from app.skills.documents import DocumentSearchTool
+from app.skills.files import FileInfoTool, FileManager, FileReadTool, FileSearchTool, FileWriteTool
+from app.skills.memory import (
     MemoryDeleteTool,
     MemorySaveTool,
     MemorySearchTool,
     ProcedureRunTool,
     ProcedureSaveTool,
 )
-from app.tools.reminders import ReminderCreateTool, ReminderDeleteTool, ReminderListTool
-from app.tools.shell import RunCodeTool, RunShellTool
-from app.tools.system import SystemConfigTool, SystemInfoTool, TimeTool
-from app.tools.tasks import TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool
-from app.tools.web import DuckDuckGoHtmlSearchProvider, WebSearchTool
-
-
-class ToolNotFoundError(KeyError):
-    pass
+from app.skills.reminders import ReminderCreateTool, ReminderDeleteTool, ReminderListTool
+from app.skills.shell import RunCodeTool, RunShellTool
+from app.skills.system import SystemConfigTool, SystemInfoTool, TimeTool
+from app.skills.tasks import TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool
+from app.skills.web import DuckDuckGoHtmlSearchProvider, WebSearchTool
+from app.tools.base import Tool, ToolPermission, ToolResult
+from app.tools.errors import ToolNotFoundError
 
 
 @dataclass(slots=True)

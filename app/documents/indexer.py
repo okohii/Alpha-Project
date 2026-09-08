@@ -13,7 +13,7 @@ from app.documents.chunker import DocumentChunker
 from app.documents.parser import DocumentParser
 from app.memory.embeddings import EmbeddingProvider
 from app.memory.repository import hybrid_score
-from app.tools.files import FileManager
+from app.skills.files.service import FileManager
 
 SUPPORTED_SUFFIXES = {
     ".txt",

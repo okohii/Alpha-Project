@@ -1,11 +1,13 @@
-from __future__ import annotations
+from app.skills.tasks.skill import SKILL
+from app.skills.tasks.tools.create import TaskCreateTool
+from app.skills.tasks.tools.execute import TaskExecuteTool
+from app.skills.tasks.tools.list import TaskListTool
+from app.skills.tasks.tools.register_path import TaskRegisterPathTool
 
-from app.skills.base import Skill
-
-SKILL = Skill(
-    name="Tasks",
-    description="Tarefas persistentes do executor automático.",
-    tools=["task_create", "task_execute", "task_list", "task_register_path"],
-)
-
-__all__ = ["SKILL"]
+__all__ = [
+    "SKILL",
+    "TaskCreateTool",
+    "TaskExecuteTool",
+    "TaskListTool",
+    "TaskRegisterPathTool"
+]

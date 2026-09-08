@@ -5,8 +5,8 @@ import os
 
 import pytest
 
-import app.tools.computer.window as w
-from app.tools.computer.window import ListMonitorsTool, MoveAppTool
+import app.skills.computer.tools.window as w
+from app.skills.computer.tools.window import ListMonitorsTool, MoveAppTool
 
 
 def run(coro):

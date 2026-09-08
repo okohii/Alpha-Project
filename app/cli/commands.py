@@ -201,8 +201,8 @@ async def _cmd_memory(ctx: SlashContext) -> None:
 
 
 async def _cmd_tasks(ctx: SlashContext, task_id: str | None = None) -> None:
+    from app.skills.files.service import FileManager
     from app.tasks.service import ManagedPathRepository, TaskExecutorService, TaskRepository
-    from app.tools.files import FileManager
 
     async with ctx.session_factory() as session:
         service = TaskExecutorService(

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from app.skills.files.service import FileManager
 from app.tasks.service import TaskExecutorService
-from app.tools.files import FileManager
 
 
 class FakeTaskRepository:

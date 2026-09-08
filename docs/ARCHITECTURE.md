@@ -28,13 +28,13 @@ Mapa dos módulos de `app/` e princípios que guiam a estrutura.
 | `app/runtime/` | Composição | `application.py` (`build_agent`), `session.py` (`AgentContext`) |
 | `app/security/` | Autorização | `PermissionManager`/níveis, `path_policy` (resolução de caminhos) |
 | `app/services/` | Serviços transversais | `system/connectivity.py` (offline → `detect_connectivity`), `browser/search.py` (provider de busca web), `health/checks.py` (`collect_health`) |
-| `app/skills/` | Catálogo de habilidades | `base.py`, `registry.py`, `catalog.py`, domínios (browser, computer, documents, files, memory, system, tasks, web) |
+| `app/skills/` | Skills = domínios | `base.py`, `registry.py`, `catalog.py`, e por domínio: `skill.py` (metadado), `service.py` (lógica reutilizável) e `tools/` (Tools chamáveis). Domínios: browser, calendar, computer, documents, files, memory, reminders, shell, system, tasks, web |
 | `app/speech/` | Áudio | `audio_io.py`, `cleaning.py`, `listener.py`, `pipeline.py`, `tts.py` |
 | `app/tasks/` | Execução persistente | `TaskExecutorService`, repositórios, actions (create_file, persist_repo_changes, ...) |
-| `app/tools/` | Ferramentas por domínio | `base.py`, `registry.py`, e `browser/`, `calendar/`, `computer/` (keyboard, mouse, screenshot, process, window, uia, application), `documents/`, `files/`, `memory/`, `reminders/`, `shell/`, `system/`, `tasks/`, `web/` |
+| `app/tools/` | Infraestrutura transversal de tools | `base.py`, `registry.py`, `errors.py` (sem tools concretas) |
 
 ## Decisões
 
-- **Packages agregadores** — `from app.tools.web import ...`, `from app.tools.files import FileManager` etc. continuam válidos porque o `__init__.py` de cada pacote re-exporta os nomes do submódulo definidor.
+- **Skills = domínios** — cada domínio em `app/skills/<domínio>/` com `skill.py` (metadado `SKILL`), `service.py` (lógica reutilizável: ex. `FileManager`, `ApplicationLauncher`, `BrowserDriver`, `SandboxRunner`) e `tools/*.py` (classes `Tool`). `app/tools/` guarda apenas a infraestrutura transversal (`base.py`, `registry.py`, `errors.py`).
 - **Testes** são organizados por domínio em `tests/unit/<domínio>/` e `tests/integration/`; alias de módulo em monkeypatch deve apontar ao **submódulo definidor** (patch em pacote não rebinda o global do submódulo).
 - **Estado de verificação**: integridade via `python -m pytest tests -q` (291 testes) e `python -m ruff check .`.

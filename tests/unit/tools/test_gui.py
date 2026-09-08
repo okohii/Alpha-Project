@@ -3,20 +3,18 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from app.tools.computer import (
+from app.skills.computer import (
     MouseClickTool,
     MouseScrollTool,
     PressKeyTool,
     ScreenshotTool,
     VerifyScreenTool,
     _key_vk,
-    keyboard,
-    mouse,
     mouse_click,
     press_sequence,
-    screenshot,
 )
-from app.tools.files import FileManager
+from app.skills.computer.tools import keyboard, mouse, screenshot
+from app.skills.files.service import FileManager
 
 
 def run(coro):

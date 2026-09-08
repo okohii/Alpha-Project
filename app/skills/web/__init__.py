@@ -1,11 +1,15 @@
-from __future__ import annotations
-
-from app.skills.base import Skill
-
-SKILL = Skill(
-    name="Web",
-    description="Pesquisa na web controlada.",
-    tools=["web_search"],
+from app.skills.web.skill import SKILL
+from app.skills.web.tools import (
+    DuckDuckGoHtmlSearchProvider,
+    WebSearchProvider,
+    WebSearchTool,
+    WebUnavailableError,
 )
 
-__all__ = ["SKILL"]
+__all__ = [
+    "SKILL",
+    "DuckDuckGoHtmlSearchProvider",
+    "WebSearchProvider",
+    "WebSearchTool",
+    "WebUnavailableError",
+]

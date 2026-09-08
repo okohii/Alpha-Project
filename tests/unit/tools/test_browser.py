@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app.tools.browser import (
+from app.skills.browser import (
     BrowserClickTool,
     BrowserDriver,
     BrowserHtmlTool,
@@ -61,7 +61,7 @@ class FakeWebSocket:
 
 
 def _build_driver(monkeypatch, result_by_method: dict[str, dict] | None = None) -> BrowserDriver:
-    import app.tools.browser.driver as browser_mod
+    import app.skills.browser.service as browser_mod
 
     driver = BrowserDriver()
     ws = FakeWebSocket(result_by_method)

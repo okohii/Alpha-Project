@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-import app.tools.computer.uia as u
-from app.tools.computer.uia import (
+import app.skills.computer.tools.uia as u
+from app.skills.computer.tools.uia import (
     ClickTextTool,
     ElementNotFoundError,
     ReadUiTool,

@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from app.db.session import get_session
+from app.skills.files.service import FileManager
 from app.tasks.service import ManagedPathRepository, TaskExecutorService, TaskRepository
-from app.tools.files import FileManager
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 

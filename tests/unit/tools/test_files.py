@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.security import AccessDeniedError
-from app.tools.files import FileManager, FileWriteTool
+from app.skills.files import FileManager, FileWriteTool
 
 
 def test_file_manager_blocks_path_traversal(tmp_path: Path):

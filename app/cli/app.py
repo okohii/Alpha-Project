@@ -24,11 +24,11 @@ from app.memory.repository import MemoryRepository
 from app.memory.service import MemoryService
 from app.perception.stt import FasterWhisperSTT
 from app.runtime import build_agent
+from app.skills.files.service import FileManager
 from app.speech import audio_io
 from app.speech.cleaning import clean_markdown_artifacts
 from app.speech.pipeline import VoicePipeline
 from app.tasks.service import ManagedPathRepository, TaskExecutorService, TaskRepository
-from app.tools.files import FileManager
 
 EXIT_COMMANDS = {"/sair", "/quit", "/exit", "/q"}
 EXIT_WORDS = {"sair", "encerrar", "parar", "fechar"}

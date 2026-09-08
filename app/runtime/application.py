@@ -15,10 +15,10 @@ from app.memory.embeddings import LocalEmbeddingProvider
 from app.memory.repository import MemoryRepository
 from app.memory.service import MemoryService
 from app.reminders.service import ReminderRepository, ReminderService
+from app.skills.files.service import FileManager
+from app.skills.tasks import TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool
 from app.tasks.service import ManagedPathRepository, TaskExecutorService, TaskRepository
-from app.tools.files import FileManager
 from app.tools.registry import build_default_tool_registry
-from app.tools.tasks import TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool
 
 
 async def build_agent(

@@ -5,20 +5,22 @@ from pathlib import Path
 
 import pytest
 
-from app.tools.computer import application as apps_module
-from app.tools.computer.application import (
+import app.skills.computer.service as apps_module
+from app.skills.computer.service import (
     AppCatalogEntry,
     ApplicationLauncher,
     InstalledAppsProvider,
-    ListAppsTool,
-    OpenAppTool,
-    OpenUrlTool,
     _clean_app_name,
     _norm,
     _normalize_url,
     _strip_filler,
 )
-from app.tools.files import FileManager
+from app.skills.computer.tools.application import (
+    ListAppsTool,
+    OpenAppTool,
+    OpenUrlTool,
+)
+from app.skills.files.service import FileManager
 
 
 def test_strip_filler_removes_leading_words():
@@ -219,7 +221,10 @@ def test_open_url_tool_uses_specified_browser(monkeypatch):
 
 def test_open_url_tool_falls_back_to_default_browser(monkeypatch):
     opened = {}
-    monkeypatch.setattr(apps_module, "_open_url_default", lambda url: opened.update(url=url))
+    monkeypatch.setattr(
+        "app.skills.computer.tools.application._open_url_default",
+        lambda url: opened.update(url=url),
+    )
     tool = OpenUrlTool(ApplicationLauncher())
     result = asyncio.run(tool.execute(url="youtube.com"))
     assert result.success
@@ -236,7 +241,7 @@ def test_open_app_tool_opens_in_monitor(monkeypatch):
             return {"app": "notepad", "path": executable}
 
     monkeypatch.setattr(
-        "app.tools.computer.application.launch_on_monitor",
+        "app.skills.computer.tools.application.launch_on_monitor",
         lambda path, monitor, args=None: launched.update(path=path, monitor=monitor, args=args)
         or {"path": executable, "app": "notepad", "moved": True, "monitor": monitor},
     )

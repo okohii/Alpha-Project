@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import asyncio
 
-from app.tools.computer import (
+from app.skills.computer import (
     AppCatalogEntry,
     ApplicationLauncher,
     CloseAppTool,
     InstalledAppsProvider,
     TypeTextTool,
 )
-from app.tools.computer import keyboard as keyboard_module
-from app.tools.computer import process as pc_module
-from app.tools.computer.process import (
+from app.skills.computer.tools import keyboard as keyboard_module
+from app.skills.computer.tools import process as pc_module
+from app.skills.computer.tools.process import (
     _match_running,
     candidate_process_names,
     close_processes,

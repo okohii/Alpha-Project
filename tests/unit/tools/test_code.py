@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.tools.shell import RunCodeTool, RunShellTool, SandboxRunner
+from app.skills.shell import RunCodeTool, RunShellTool, SandboxRunner
 
 
 @pytest.mark.anyio

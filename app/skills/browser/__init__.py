@@ -1,20 +1,35 @@
-from __future__ import annotations
-
-from app.skills.base import Skill
-
-SKILL = Skill(
-    name="Browser",
-    description="Navegação web: página atual, clique, texto, js e abertura de sites.",
-    tools=[
-        "browser_open",
-        "browser_text",
-        "browser_html",
-        "browser_js",
-        "browser_click",
-        "browser_wait",
-        "browser_screenshot",
-        "open_url",
-    ],
+from app.skills.browser.service import (
+    CHROME_PATHS,
+    BrowserDriver,
+    BrowserError,
+    BrowserNotAvailableError,
+    find_browser_exe,
+)
+from app.skills.browser.skill import SKILL
+from app.skills.browser.tools import (
+    BrowserClickTool,
+    BrowserHtmlTool,
+    BrowserJsTool,
+    BrowserOpenTool,
+    BrowserScreenshotTool,
+    BrowserTextTool,
+    BrowserWaitTool,
+    _coerce_url,
 )
 
-__all__ = ["SKILL"]
+__all__ = [
+    "SKILL",
+    "CHROME_PATHS",
+    "BrowserDriver",
+    "BrowserError",
+    "BrowserNotAvailableError",
+    "find_browser_exe",
+    "BrowserOpenTool",
+    "BrowserTextTool",
+    "BrowserHtmlTool",
+    "BrowserJsTool",
+    "BrowserClickTool",
+    "BrowserWaitTool",
+    "BrowserScreenshotTool",
+    "_coerce_url",
+]

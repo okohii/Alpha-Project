@@ -234,7 +234,7 @@ async def test_runner_start_stop_lifecycle():
 
 @pytest.mark.anyio
 async def test_reminder_create_tool_success():
-    from app.tools.reminders import ReminderCreateTool
+    from app.skills.reminders import ReminderCreateTool
 
     service = ReminderService(FakeReminderRepository())
     tool = ReminderCreateTool(service)
@@ -247,7 +247,7 @@ async def test_reminder_create_tool_success():
 
 @pytest.mark.anyio
 async def test_reminder_create_tool_rejects_bad_schedule():
-    from app.tools.reminders import ReminderCreateTool
+    from app.skills.reminders import ReminderCreateTool
 
     service = ReminderService(FakeReminderRepository())
     tool = ReminderCreateTool(service)
@@ -259,7 +259,7 @@ async def test_reminder_create_tool_rejects_bad_schedule():
 
 @pytest.mark.anyio
 async def test_reminder_list_and_delete_tools():
-    from app.tools.reminders import ReminderDeleteTool, ReminderListTool
+    from app.skills.reminders import ReminderDeleteTool, ReminderListTool
 
     repo = FakeReminderRepository()
     repo.items.append(_make_reminder())

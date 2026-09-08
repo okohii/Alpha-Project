@@ -1,13 +1,7 @@
-from __future__ import annotations
+from app.skills.documents.skill import SKILL
+from app.skills.documents.tools.search import DocumentSearchTool
 
-from app.skills.base import Skill
-
-SKILL = Skill(
-    name="Documents",
-    description="Indexação e busca semântica em documentos do projeto/computador.",
-    tools=[
-        "document_search",
-    ],
-)
-
-__all__ = ["SKILL"]
+__all__ = [
+    "SKILL",
+    "DocumentSearchTool"
+]

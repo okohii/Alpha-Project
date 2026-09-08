@@ -9,7 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.db.models import ManagedPathRecord, TaskRecord
-from app.tools.files import FileManager
+from app.skills.files.service import FileManager
 
 
 @dataclass(slots=True)

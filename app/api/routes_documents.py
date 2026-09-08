@@ -8,8 +8,8 @@ from pydantic import BaseModel, Field
 from app.db.session import get_session
 from app.documents.indexer import DocumentIndexer, DocumentRepository
 from app.memory.embeddings import LocalEmbeddingProvider
+from app.skills.files.service import FileManager
 from app.tasks.service import ManagedPathRepository
-from app.tools.files import FileManager
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
