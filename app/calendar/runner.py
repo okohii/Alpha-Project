@@ -7,22 +7,17 @@ from pathlib import Path
 from typing import Any
 
 from app.db.models import SystemEventRecord
-from app.reminders.service import SAFE_ACTIONS, ReminderRepository, ReminderService
 from app.skills.files.service import FileManager
 from app.tasks.service import ManagedPathRepository, TaskExecutorService, TaskRepository
 from app.tools.registry import build_default_tool_registry
 
-logger = logging.getLogger("app.reminders.runner")
+logger = logging.getLogger("app.calendar.runner")
 
 ActionRunner = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
-class RegistryActionRunner:
-    """Executa ações agendadas por meio do registro de ferramentas.
-
-    Apenas ações seguras (SAFE_ACTIONS) + "notify" são permitidas; qualquer outra é
-    rejeitada antes de tocar no sistema.
-    """
+class CalendarActionRunner:
+    """Executa ações agendadas no calendário."""
 
     def __init__(self, session: Any) -> None:
         self.session = session
@@ -32,16 +27,28 @@ class RegistryActionRunner:
         if action == "notify":
             message = str(params.get("message") or "")
             payload = {"message": message, **params}
-            self.session.add(SystemEventRecord(type="reminder", payload=payload))
+            self.session.add(SystemEventRecord(type="calendar_event", payload=payload))
             await self.session.commit()
             return {"message": message, "notified": True}
-        if action not in SAFE_ACTIONS:
-            raise ValueError(f"Ação não permitida no agendador: {action}")
-        registry = await self._registry_for_session()
-        result = await registry.execute(action, **params)
-        if not result.success:
-            raise RuntimeError(str(result.error or "Falha desconhecida"))
-        return dict(result.data or {})
+        if action == "macro_run":
+            from app.macros.service import macro_service
+            macro_id = str(params.get("macro_id", "") or "")
+            name = str(params.get("name", "") or "")
+            if not macro_id and name:
+                macro = await macro_service.search_macro(name)
+                if macro:
+                    macro_id = macro.id
+            if macro_id:
+                log = await macro_service.execute_macro(macro_id, params)
+                return {"status": log.status, "steps_executed": log.steps_executed}
+            return {"error": "Macro não encontrada"}
+        if action in ("open_app", "open_url", "open_file", "task_execute"):
+            registry = await self._registry_for_session()
+            result = await registry.execute(action, **params)
+            if not result.success:
+                raise RuntimeError(str(result.error or "Falha desconhecida"))
+            return dict(result.data or {})
+        raise ValueError(f"Ação não permitida no calendário: {action}")
 
     async def _registry_for_session(self) -> Any:
         if self._registry is not None:
@@ -64,14 +71,14 @@ class RegistryActionRunner:
         return self._registry
 
 
-class SchedulerRunner:
-    """Loop assíncrono que verifica e executa lembretes vencidos em background."""
+class CalendarRunner:
+    """Loop assíncrono que verifica e executa eventos do calendário vencidos."""
 
     def __init__(
         self,
         session_factory: Any,
         *,
-        interval_seconds: float = 15.0,
+        interval_seconds: float = 30.0,
         on_notify: Callable[[str], None] | None = None,
     ) -> None:
         self.session_factory = session_factory
@@ -81,10 +88,12 @@ class SchedulerRunner:
         self._running = False
 
     async def tick(self) -> list[dict[str, Any]]:
+        from app.calendar.service import CalendarRepository, CalendarService
+        
         async with self.session_factory() as session:
-            runner = RegistryActionRunner(session)
-            service = ReminderService(ReminderRepository(session))
-            results = await service.process_due(runner.run)
+            runner = CalendarActionRunner(session)
+            service = CalendarService(CalendarRepository(session))
+            results = await service.process_due_events(runner.run)
         for item in results:
             is_notify = item.get("success") and item.get("action") == "notify"
             if is_notify and self.on_notify is not None:
@@ -99,8 +108,8 @@ class SchedulerRunner:
                 await self.tick()
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - falha no ciclo não derruba o agendador
-                logger.exception("Falha no ciclo do agendador")
+            except Exception:  # noqa: BLE001 - falha no ciclo não derruba o runner
+                logger.exception("Falha no ciclo do calendário")
             await asyncio.sleep(self.interval_seconds)
 
     async def start(self) -> asyncio.Task[Any]:

@@ -75,6 +75,15 @@ class Settings(BaseSettings):
     rag_top_k: int = 5
     agent_max_tool_iterations: int = 8
 
+    # Seleção de ferramentas por Skill: expõe apenas as ferramentas da(s)
+    # skill(s) relacionada(s) ao pedido, em vez de todo o catálogo.
+    agent_tool_selection: bool = True
+    # Sem interface de confirmação (ex.: API), ferramentas sensíveis ficam
+    # negadas por padrão; habilite apenas se quiser autorização automática.
+    agent_auto_approve_sensitive: bool = False
+    agent_tool_result_strict: bool = True
+    agent_require_tool_verification: bool = False
+
     scheduler_enabled: bool = True
     scheduler_interval_seconds: float = 15.0
 

@@ -77,7 +77,7 @@ class BrowserDriver:
     def _chrome_alive(self) -> bool:
         return _is_port_open(self.port)
 
-    def start_browser(self, url: str | None = None) -> dict[str, Any]:
+    async def start_browser(self, url: str | None = None) -> dict[str, Any]:
         if self._chrome_alive():
             return {"started": False, "already_running": True, "port": self.port}
         exe = find_browser_exe()
@@ -101,7 +101,7 @@ class BrowserDriver:
         while time.monotonic() < deadline:
             if self._chrome_alive():
                 return {"started": True, "already_running": False, "port": self.port}
-            time.sleep(0.3)
+            await asyncio.sleep(0.3)
         raise BrowserNotAvailableError("O navegador não abriu a porta de debugging a tempo.")
 
     async def _get_targets(self) -> list[dict[str, Any]]:
@@ -197,13 +197,27 @@ class BrowserDriver:
         await self._call("Page.enable", timeout=5)
         await self._call("Runtime.enable", timeout=5)
 
-    async def navigate(self, url: str, wait_for: float = 1.2) -> dict[str, Any]:
+    async def navigate(self, url: str, wait_for: float = 10.0) -> dict[str, Any]:
         if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
             url = "https://" + url
         await self._enable()
         await self._call("Page.navigate", {"url": url}, timeout=30)
-        await asyncio.sleep(wait_for)
+        # Espera condicional por estado (DOM pronto), não por tempo fixo.
+        await self._wait_ready(wait_for)
         return {"url": url, "title": await self.get_title()}
+
+    async def _wait_ready(self, timeout: float) -> None:
+        deadline = asyncio.get_event_loop().time() + max(float(timeout), 0.0)
+        while True:
+            try:
+                ready = await self._evaluate("document.readyState === 'complete'")
+                if ready:
+                    return
+            except (BrowserError, BrowserNotAvailableError):
+                pass
+            if asyncio.get_event_loop().time() >= deadline:
+                return
+            await asyncio.sleep(0.2)
 
     async def get_title(self) -> str:
         result = await self._evaluate("document.title")
@@ -264,24 +278,36 @@ class BrowserDriver:
         value = await self._evaluate(expression)
         return value if isinstance(value, list) else []
 
-    async def click(self, text: str, sel: str | None = None) -> bool:
+    async def click(self, text: str, sel: str | None = None) -> dict[str, Any]:
         await self._enable()
         selector = sel or "*"
         parts = [p for p in str(text).lower().split() if p]
+        target_text = " ".join(parts)
         if not parts:
             raise ValueError("Informe o texto do elemento a clicar.")
         conditions = " && ".join(
             f"(e.innerText||'').toLowerCase().includes({json.dumps(p)})" for p in parts
         )
         expression = (
-            f"(()=>{{const els=Array.from(document.querySelectorAll({json.dumps(selector)}))"
+            f"(()=>{{const text={json.dumps(target_text)};"
+            f"const els=Array.from(document.querySelectorAll({json.dumps(selector)}))"
             f".filter(e=>{conditions} && e.getClientRects().length);"
-            f"if(!els.length)return false; const e=els[0];"
-            f"if(typeof e.click==='function')e.click();"
-            f"else e.dispatchEvent(new MouseEvent('click',{{bubbles:true,view:window}}));"
-            f"return true;}})()"
+            "if(!els.length)return {clicked:false,match:0,text:'',selected:''};"
+            "const norm=e=>(e.innerText||'').trim().replace(/\\s+/g,' ');"
+            "const ranked=els.map((e,i)=>{const t=norm(e).toLowerCase();let score=0;"
+            "if(t===text)score+=100;"
+            "if(/^(button|a|input|summary|[a-z]+button)$/i.test(e.tagName))score+=30;"
+            "score-=Math.min(t.length/10,40);return {e,score,t};})"
+            ".sort((a,b)=>b.score-a.score);"
+            "const target=ranked[0];const e=target.e;"
+            "if(typeof e.click==='function')e.click();"
+            "else e.dispatchEvent(new MouseEvent('click',{bubbles:true,view:window}));"
+            "return {clicked:true,match:els.length,text:target.t,selected:norm(e)};}})()"
         )
-        return bool(await self._evaluate(expression))
+        value = await self._evaluate(expression)
+        if isinstance(value, dict):
+            return value
+        return {"clicked": bool(value), "match": 1, "text": target_text, "selected": target_text}
 
     async def click_point(self, x: int, y: int) -> None:
         await self._enable()
@@ -323,7 +349,6 @@ class BrowserDriver:
             "Input.dispatchKeyEvent",
             {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13},
         )
-        await asyncio.sleep(0.3)
 
     async def wait_for_text(self, text: str, timeout: float = 15.0) -> bool:
         expression = f"document.body && document.body.innerText.toLowerCase().includes({json.dumps(text.lower())})"  # noqa: E501

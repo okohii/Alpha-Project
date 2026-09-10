@@ -26,7 +26,7 @@ class BrowserWaitTool(Tool):
         timeout = float(kwargs.get("timeout_s", 15.0))
         driver = self._driver()
         try:
-            driver.start_browser()
+            await driver.start_browser()
             found = await driver.wait_for_text(text, timeout)
             return ToolResult(
                 name=self.name,

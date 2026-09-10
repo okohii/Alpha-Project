@@ -1,9 +1,9 @@
 from app.skills.base import Skill
 from app.skills.browser import SKILL as BROWSER_SKILL
-from app.skills.calendar import SKILL as CALENDAR_SKILL
 from app.skills.computer import SKILL as COMPUTER_SKILL
 from app.skills.documents import SKILL as DOCUMENTS_SKILL
 from app.skills.files import SKILL as FILES_SKILL
+from app.skills.macros import SKILL as MACROS_SKILL
 from app.skills.memory import SKILL as MEMORY_SKILL
 from app.skills.registry import SkillRegistry
 from app.skills.reminders import SKILL as REMINDERS_SKILL
@@ -18,9 +18,9 @@ _SKILLS: list[Skill] = [
     DOCUMENTS_SKILL,
     COMPUTER_SKILL,
     MEMORY_SKILL,
+    MACROS_SKILL,
     WEB_SKILL,
     SHELL_SKILL,
-    CALENDAR_SKILL,
     REMINDERS_SKILL,
     TASKS_SKILL,
     SYSTEM_SKILL,

@@ -105,6 +105,22 @@ class GeminiProvider:
                     )
                 continue
 
+            if message.role == "assistant" and message.tool_calls:
+                parts: list[dict[str, Any]] = []
+                if message.content:
+                    parts.append({"text": message.content})
+                for call in message.tool_calls:
+                    parts.append(
+                        {
+                            "functionCall": {
+                                "name": call.name,
+                                "args": call.arguments or {},
+                            }
+                        }
+                    )
+                contents.append({"role": "model", "parts": parts})
+                continue
+
             role = "user" if message.role == "user" else "model"
 
             contents.append(

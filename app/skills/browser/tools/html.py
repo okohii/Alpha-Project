@@ -20,7 +20,7 @@ class BrowserHtmlTool(Tool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         driver = self._driver()
         try:
-            driver.start_browser()
+            await driver.start_browser()
             sel = kwargs.get("sel")
             html = await driver.get_html(sel=str(sel) if sel else None)
             data = {"length": len(html), "html": html}

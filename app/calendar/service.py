@@ -246,6 +246,20 @@ class CalendarRepository:
         result = await self.session.execute(statement)
         return list(result.scalars().all())
 
+    async def list_due(self, now: datetime) -> list[CalendarEventRecord]:
+        """Lista eventos com ação que devem ser executados."""
+        from sqlalchemy import select
+
+        statement = (
+            select(CalendarEventRecord)
+            .where(CalendarEventRecord.enabled == 1)
+            .where(CalendarEventRecord.action.isnot(None))
+            .where(CalendarEventRecord.next_run_at <= now)
+            .order_by(CalendarEventRecord.next_run_at)
+        )
+        result = await self.session.execute(statement)
+        return list(result.scalars().all())
+
     async def delete(self, event_id: str) -> None:
         record = await self.get(event_id)
         if record is not None:

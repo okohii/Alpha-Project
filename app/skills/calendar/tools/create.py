@@ -10,7 +10,8 @@ class CalendarCreateTool(Tool):
     description = (
         "Cria um evento na agenda. start aceita '17:30', 'amanhã 10:00', 'segunda 09:00', "
         "'2026-09-07 09:00', '17/12 14:30' ou 'em 2 horas'. end (opcional) aceita "
-        "'1 hora', '30 minutos' ou outro horário; sem end vale 1 hora."
+        "'1 hora', '30 minutos' ou outro horário; sem end vale 1 hora. "
+        "action (opcional) pode ser 'notify', 'open_app', 'open_url', 'macro_run'."
     )
     permission = ToolPermission.write
 
@@ -19,12 +20,25 @@ class CalendarCreateTool(Tool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
+            action = str(kwargs.get("action")) if kwargs.get("action") else None
+            action_params = dict(kwargs.get("action_params") or {})
+            
+            # Se action_params é string JSON, converte
+            if isinstance(action_params, str):
+                import json
+                try:
+                    action_params = json.loads(action_params)
+                except json.JSONDecodeError:
+                    action_params = {}
+            
             view = await self.calendar_service.create_event(
                 title=str(kwargs.get("title", "")),
                 start_text=str(kwargs.get("start", "")),
                 end_text=str(kwargs.get("end")) if kwargs.get("end") else None,
                 description=str(kwargs.get("description")) if kwargs.get("description") else None,
                 location=str(kwargs.get("location")) if kwargs.get("location") else None,
+                action=action,
+                action_params=action_params if action else None,
             )
         except ValueError as exc:
             return ToolResult(name=self.name, success=False, data={}, error=str(exc))
@@ -39,6 +53,14 @@ class CalendarCreateTool(Tool):
                 "end": {"type": "string", "description": "Duração ou fim (padrão: 1 hora)"},
                 "description": {"type": "string", "description": "Anotações do evento"},
                 "location": {"type": "string", "description": "Local (ex.: 'escritório')"},
+                "action": {
+                    "type": "string",
+                    "description": "Ação a executar: notify, open_app, open_url, macro_run",
+                },
+                "action_params": {
+                    "type": "object",
+                    "description": "Parâmetros da ação. Para notify: {'message': '...'}",
+                },
             },
             "required": ["title", "start"],
         }

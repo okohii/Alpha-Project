@@ -8,7 +8,7 @@ trabalho". Tudo é opcional: sem visão disponível, verify() retorna inconclusi
 """
 from __future__ import annotations
 
-import time
+import asyncio
 from typing import Any
 
 from app.core.config import get_settings
@@ -73,7 +73,7 @@ class OllamaVisionVerifier:
                 }
             attempts += 1
             if image_path is not None:
-                time.sleep(retry_delay)
+                await asyncio.sleep(retry_delay)
 
     async def _describe(self, image_path: str, goal: str) -> dict[str, Any]:
         if not self.available():

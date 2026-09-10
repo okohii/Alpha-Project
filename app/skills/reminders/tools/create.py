@@ -8,9 +8,11 @@ from app.tools.base import Tool, ToolPermission, ToolResult
 class ReminderCreateTool(Tool):
     name = "reminder_create"
     description = (
-        "Agenda um lembrete ou ação automática. schedule aceita '17:30', 'todo dia 09:00', "
-        "'2026-09-07 09:00', 'em 30 minutos' ou cron de 5 campos. action pode ser "
-        "'notify' (avisar o usuário) ou open_app/open_url/open_file/task_execute."
+        "Agenda um lembrete ou ação automática. schedule aceita horários amigáveis: "
+        "'17:30', 'amanhã às 17:30', 'segunda às 09:00', 'todo dia 09:00', "
+        "'a cada 30 minutos', 'a cada 2 horas', 'em 30 minutos', "
+        "'2026-09-07 09:00' ou cron de 5 campos. "
+        "action pode ser 'notify' (avisar o usuário) ou open_app/open_url/open_file/task_execute."
     )
     permission = ToolPermission.write
 

@@ -18,6 +18,15 @@ async def initialize_database() -> None:
     )
     if not should_create:
         return
+    # Importa modelos de macros aqui para evitar import circular
+    # e garantir que as tabelas sejam criadas pelo Base.metadata.create_all
+    from app.macros.models import (  # noqa: F401
+        MacroExecutionLogRecord,
+        MacroRecord,
+        MacroScheduleRecord,
+        MacroStepRecord,
+    )
+
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 

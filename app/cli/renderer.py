@@ -54,7 +54,8 @@ class TerminalRenderer:
     def stream_token(self, token: str) -> None:
         self._streamed = True
         if self.is_terminal and self.verbosity not in (Verbosity.quiet,):
-            self.console.print(token, end="", flush=True)
+            self.console.print(token, end="")
+            self.console.file.flush()
         else:
             self._stream_buffer.append(token)
 

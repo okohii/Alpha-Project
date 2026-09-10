@@ -23,7 +23,7 @@ class BrowserTextTool(Tool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         driver = self._driver()
         try:
-            driver.start_browser()
+            await driver.start_browser()
             query = kwargs.get("query")
             if query:
                 text = await driver.get_text(partial=str(query))

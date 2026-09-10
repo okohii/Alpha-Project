@@ -23,7 +23,7 @@ class BrowserClickTool(Tool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         driver = self._driver()
         try:
-            driver.start_browser()
+            await driver.start_browser()
             if kwargs.get("x") is not None and kwargs.get("y") is not None:
                 await driver.click_point(int(kwargs["x"]), int(kwargs["y"]))
                 return ToolResult(
@@ -34,10 +34,14 @@ class BrowserClickTool(Tool):
                 return ToolResult(
                     name=self.name, success=False, data={}, error="Informe 'text' ou 'x'/'y'."
                 )
-            clicked = await driver.click(text)
-            return ToolResult(
-                name=self.name, success=clicked, data={"clicked": clicked, "text": text}
-            )
+            result = await driver.click(text)
+            clicked = bool(result.get("clicked")) if isinstance(result, dict) else bool(result)
+            data: dict[str, Any] = {"clicked": clicked, "text": text}
+            if isinstance(result, dict):
+                data["matches"] = result.get("match", 1)
+                if result.get("selected"):
+                    data["selected"] = result["selected"]
+            return ToolResult(name=self.name, success=clicked, data=data)
         except Exception as exc:
             return ToolResult(name=self.name, success=False, data={}, error=str(exc))
         finally:

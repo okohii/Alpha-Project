@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -32,6 +33,21 @@ def _render_value(value: Any, indent: int = 0) -> str:
             lines.append(f"{pad}- {rendered}")
         return "\n".join(lines)
     return f"{pad}{value}"
+
+
+def _serialize_message(message: LLMMessage) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "role": message.role,
+        "content": _render_tool_content(message.content)
+        if message.role == "tool"
+        else (message.content or ""),
+    }
+    if message.tool_calls:
+        payload["tool_calls"] = [
+            {"function": {"name": call.name, "arguments": call.arguments or {}}}
+            for call in message.tool_calls
+        ]
+    return payload
 
 
 def _render_tool_content(content: str) -> str:
@@ -90,27 +106,30 @@ class OllamaProvider:
             raise OllamaUnavailableError("OLLAMA_MODEL não configurado")
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": message.role,
-                    "content": _render_tool_content(message.content)
-                    if message.role == "tool"
-                    else message.content,
-                }
-                for message in messages
-            ],
+            "messages": [_serialize_message(message) for message in messages],
             "stream": False,
             "options": {"temperature": temperature},
         }
         if tools:
             payload["tools"] = tools
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
+
+        response: httpx.Response | None = None
+        for attempt in range(1, 4):
             try:
-                response = await client.post("/api/chat", json=payload)
+                async with httpx.AsyncClient(
+                    base_url=self.base_url, timeout=self.timeout
+                ) as client:
+                    response = await client.post("/api/chat", json=payload)
+                if response.status_code >= 500:
+                    # Cold start: o modelo ainda está carregando ou o servidor
+                    # reiniciou; espera um pouco e tenta de novo.
+                    await asyncio.sleep(1.5 * attempt)
+                    continue
                 response.raise_for_status()
+                break
             except httpx.HTTPStatusError as exc:
                 if (
-                    tools
+                    response is not None
                     and exc.response.status_code == 400
                     and "does not support tools" in exc.response.text
                 ):
@@ -121,12 +140,21 @@ class OllamaProvider:
                         self.model,
                     )
                     payload.pop("tools", None)
-                    response = await client.post("/api/chat", json=payload)
-                    response.raise_for_status()
-                else:
-                    raise
+                    continue
+                raise
             except httpx.RequestError as exc:
+                if attempt < 3 and (
+                    isinstance(exc, httpx.ConnectError)
+                    or isinstance(exc, httpx.TimeoutException)
+                ):
+                    await asyncio.sleep(1.0 * attempt)
+                    continue
                 raise self._error_from_request(exc) from exc
+
+        if response is None:
+            raise OllamaUnavailableError(f"Não foi possível falar com o Ollama em {self.base_url}.")
+        if response.status_code >= 500:
+            response.raise_for_status()  # esgotou as tentativas de retry
         data = response.json()
         message = data.get("message", {})
         tool_calls = parse_tool_calls(message.get("tool_calls") or [])
@@ -156,15 +184,7 @@ class OllamaProvider:
 
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": message.role,
-                    "content": _render_tool_content(message.content)
-                    if message.role == "tool"
-                    else message.content,
-                }
-                for message in messages
-            ],
+            "messages": [_serialize_message(message) for message in messages],
             "stream": True,
             "options": {"temperature": temperature},
         }

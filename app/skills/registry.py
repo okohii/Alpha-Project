@@ -43,14 +43,50 @@ class SkillRegistry:
         self._resolvers.append(resolver)
 
     def find_for_task(self, task_description: str) -> Skill | None:
+        matches = self.skills_for_task(task_description)
+        return matches[0] if matches else None
+
+    def skills_for_task(self, task_description: str) -> list[Skill]:
+        """Retorna todas as skills cujas palavras-chave casam com o pedido."""
         normalized = (task_description or "").lower()
+        matches: list[Skill] = []
+        seen: set[str] = set()
         for resolver in self._resolvers:
             match = resolver(normalized)
-            if match:
-                return self._skills.get(match.lower())
+            if match and match.lower() not in seen:
+                skill = self._skills.get(match.lower())
+                if skill is not None:
+                    matches.append(skill)
+                    seen.add(skill.name.lower())
         for skill in self._skills.values():
+            if skill.name.lower() in seen:
+                continue
             if any(keyword in normalized for keyword in _skill_keywords(skill)):
-                return skill
+                matches.append(skill)
+                seen.add(skill.name.lower())
+        return matches
+
+    def best_skill_for_task(self, task_description: str) -> Skill | None:
+        """Retorna a skill com MAIS keywords casando (desambiguação).
+        
+        Se houver empate entre skills, retorna None para sinalizar que o chamador
+        deve usar ferramentas de TODAS as skills empatadas no topo.
+        """
+        skills = self.skills_for_task(task_description)
+        if not skills:
+            return None
+        if len(skills) == 1:
+            return skills[0]
+        # Conta matches por skill (usa nome como chave)
+        normalized = (task_description or "").lower()
+        scores: dict[str, int] = {}
+        for skill in skills:
+            scores[skill.name] = sum(1 for kw in _skill_keywords(skill) if kw in normalized)
+        max_score = max(scores.values())
+        top_names = [name for name, sc in scores.items() if sc == max_score]
+        if len(top_names) == 1:
+            return self._skills[top_names[0].lower()]
+        # Empate no topo: retorna None para o chamador combinar as top skills
         return None
 
     def skill_for_tool(self, tool_name: str) -> str | None:
@@ -76,8 +112,12 @@ class SkillRegistry:
 def _skill_keywords(skill: Skill) -> list[str]:
     keywords: dict[str, list[str]] = {
         "browser": [
-            "navegador", "site", "url", "chrome", "edge",
-            "github", "youtube", "web", "página", "pagina",
+            "navegador", "site", "url", "chrome", "edge", "firefox", "brave",
+            "github", "youtube", "youtu.be", "web", "página", "pagina",
+            "whatsapp", "web.whatsapp", "teams", "teams.microsoft", "teams.live",
+            "slack", "discord", "telegram", "instagram", "facebook", "twitter",
+            "x.com", "linkedin", "gmail", "outlook", "drive.google", "google drive",
+            "netflix", "prime video", "primevideo", "spotify", "twitch",
         ],
         "files": [
             "arquivo", "pasta", "diretório", "diretorio",
@@ -85,8 +125,11 @@ def _skill_keywords(skill: Skill) -> list[str]:
         ],
         "documents": ["indexar", "documento", "pesquisar documento", "buscar documento"],
         "computer": [
-            "abrir", "fechar", "aplicativo", "app", "janela",
-            "clicar", "teclado", "mouse", "print", "screenshot",
+            "abrir aplicativo", "abrir programa", "abrir app", "fechar aplicativo",
+            "fechar programa", "janela", "monitor", "atalho", "instalado",
+            "clicar", "teclado", "mouse", "print", "screenshot", "digitar",
+            # Apps conhecidos que podem ser desktop OU web:
+            "whatsapp", "teams", "slack", "discord", "telegram", "zoom", "skype",
         ],
         "memory": [
             "memória", "memoria", "lembrar", "lembra",
@@ -97,5 +140,13 @@ def _skill_keywords(skill: Skill) -> list[str]:
             "notícia", "noticia", "google", "web",
         ],
         "system": ["hora", "status", "sistema", "configuração", "configuracao", "tempo"],
+        "reminders": [
+            "lembrete", "lembrar", "lembra", "lembre",
+            " às 1", " daqui a", "todo dia", "daqui",
+            "agendar", "agenda",
+        ],
+        "calendar": ["agenda", "reunião", "reuniao", "compromisso", "evento"],
+        "tasks": ["tarefa", "executar", "rotina", "agendar tarefa"],
+        "shell": ["terminal", "comando de shell", "script", "código", "codigo"],
     }
     return keywords.get(skill.name.lower(), [skill.name.lower()])

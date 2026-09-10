@@ -36,7 +36,7 @@ class BrowserOpenTool(Tool):
             return ToolResult(name=self.name, success=False, data={}, error="Informe a URL.")
         driver = self._driver()
         try:
-            driver.start_browser(url)
+            await driver.start_browser(url)
             result = await driver.navigate(url)
             return ToolResult(name=self.name, success=True, data=result)
         except Exception as exc:

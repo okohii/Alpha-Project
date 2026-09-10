@@ -79,7 +79,10 @@ def _build_driver(monkeypatch, result_by_method: dict[str, dict] | None = None) 
 
 
 def _skip_start(driver: BrowserDriver) -> BrowserDriver:
-    driver.start_browser = lambda url=None: {"started": True}  # type: ignore[method-assign]
+    async def _noop_start(url=None):
+        return {"started": True}
+
+    driver.start_browser = _noop_start  # type: ignore[method-assign]
     return driver
 
 
@@ -116,7 +119,7 @@ async def test_browser_open_tool_requires_url(monkeypatch):
 @pytest.mark.anyio
 async def test_browser_open_tool_surfaces_error(monkeypatch):
     class Boom(BrowserDriver):
-        def start_browser(self, url=None):
+        async def start_browser(self, url=None):
             raise RuntimeError("boom")
 
     driver = Boom()

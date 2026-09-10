@@ -26,6 +26,35 @@ _DAILY_RE = re.compile(
     r"^(?:todo dia|todos os dias|diariamente|todos dias)\s+(\d{1,2}):(\d{2})$",
     re.IGNORECASE,
 )
+_MONTHLY_RE = re.compile(
+    r"^todo dia (\d{1,2})\s*(\d{1,2}):(\d{2})$",
+    re.IGNORECASE,
+)
+_TOMORROW_RE = re.compile(
+    r"^amanh[ãa]\s*(?:às|as| às| as)?\s*(\d{1,2}):(\d{2})$",
+    re.IGNORECASE,
+)
+_WEEKDAY_RE = re.compile(
+    r"^(?:todo\s+)?(segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)\s*(?:às|as)?\s*(\d{1,2}):(\d{2})$",
+    re.IGNORECASE,
+)
+_EVERY_RE = re.compile(
+    r"^a cada\s+(?:(?P<amount>\d+)\s*)?"
+    r"(?P<unit>minuto|min|minutos|hora|horas|h|dia|dias|semana|semanas)$",
+    re.IGNORECASE,
+)
+
+_WEEKDAY_MAP = {
+    "segunda": 0,
+    "terça": 1,
+    "terca": 1,
+    "quarta": 2,
+    "quinta": 3,
+    "sexta": 4,
+    "sábado": 5,
+    "sabado": 5,
+    "domingo": 6,
+}
 
 
 @dataclass(slots=True)
@@ -57,6 +86,15 @@ class ReminderRecordView:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        def _to_local(dt: datetime | None) -> str | None:
+            if dt is None:
+                return None
+            # Converte UTC para horário local do usuário (UTC-3 Brasília)
+            from datetime import timezone
+            local_tz = timezone(timedelta(hours=-3))
+            local_dt = dt.astimezone(local_tz)
+            return local_dt.strftime("%Y-%m-%d %H:%M")
+        
         return {
             "id": self.id,
             "title": self.title,
@@ -65,10 +103,8 @@ class ReminderRecordView:
             "action": self.action,
             "params": self.params,
             "enabled": self.enabled,
-            "last_run_at": (
-                self.last_run_at.isoformat() if self.last_run_at is not None else None
-            ),
-            "next_run_at": self.next_run_at.isoformat() if self.next_run_at is not None else None,
+            "last_run_at": _to_local(self.last_run_at),
+            "next_run_at": _to_local(self.next_run_at),
             "error": self.error,
         }
 
@@ -90,10 +126,27 @@ def parse_schedule(
       - "2026-09-07 09:00"
       - "em 30 minutos" / "daqui a 2 horas"
       - "todo dia 09:00"
+      - "amanhã às 17:30"
+      - "segunda às 09:00" / "todo segunda às 09:00"
+      - "a cada 30 minutos" / "a cada 2 horas"
       - cron de 5 campos, ex.: "0 9 * * 1-5"
     """
+    from datetime import timezone
+    
     raw = (text or "").strip().lower().replace("às ", "").replace("as ", "")
-    base = _as_utc(now or datetime.now(UTC)) or datetime.now(UTC)
+    
+    # Fuso horário do usuário: UTC-3 (Brasília)
+    local_tz = timezone(timedelta(hours=-3))
+    
+    # Usa horário fornecido ou horário atual do usuário
+    if now is not None:
+        # Converte para horário local se necessário
+        if now.tzinfo is None:
+            base = now.replace(tzinfo=UTC).astimezone(local_tz)
+        else:
+            base = now.astimezone(local_tz)
+    else:
+        base = datetime.now(local_tz)
 
     if not raw:
         raise ValueError("Horário vazio.")
@@ -101,9 +154,37 @@ def parse_schedule(
     if _ONCE_RE.match(text.strip()):
         parsed = datetime.fromisoformat(text.strip().replace(" ", "T"))
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=UTC)
+            # Interpreta como horário local do usuário
+            parsed = parsed.replace(tzinfo=local_tz)
         parsed = parsed.astimezone(UTC)
         return "once", parsed.isoformat()
+
+    # "amanhã às 17:30"
+    tomorrow = _TOMORROW_RE.match(raw)
+    if tomorrow:
+        scheduled = (base + timedelta(days=1)).replace(
+            hour=int(tomorrow.group(1)), minute=int(tomorrow.group(2)), second=0, microsecond=0
+        )
+        return "once", scheduled.astimezone(UTC).isoformat()
+
+    # "segunda às 09:00" / "todo segunda às 09:00"
+    weekday_match = _WEEKDAY_RE.match(raw)
+    if weekday_match:
+        day_name = weekday_match.group(1).lower()
+        target_weekday = _WEEKDAY_MAP.get(day_name)
+        if target_weekday is not None:
+            hour = int(weekday_match.group(2))
+            minute = int(weekday_match.group(3))
+            days_ahead = (target_weekday - base.weekday()) % 7
+            if days_ahead == 0:
+                # Se é o mesmo dia, verifica se o horário já passou
+                candidate = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if candidate <= base:
+                    days_ahead = 7
+            scheduled = (base + timedelta(days=days_ahead)).replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
+            return "once", scheduled.astimezone(UTC).isoformat()
 
     match = _TIME_RE.match(raw)
     if match and not _DAILY_RE.match(raw):
@@ -116,9 +197,23 @@ def parse_schedule(
 
     daily = _DAILY_RE.match(raw)
     if daily:
-        minutes = f"{int(daily.group(2)):02d}"
-        hours = f"{int(daily.group(1)) % 24:02d}"
+        # Converte horário local para UTC
+        hour = int(daily.group(1)) % 24
+        minute = int(daily.group(2))
+        # Ajusta para UTC-3: 08:00 local = 11:00 UTC
+        utc_hour = (hour + 3) % 24
+        minutes = f"{minute:02d}"
+        hours = f"{utc_hour:02d}"
         return "cron", f"{minutes} {hours} * * *"
+
+    # "todo dia 14 às 14:30" (dia do mês)
+    monthly = _MONTHLY_RE.match(raw)
+    if monthly:
+        day = int(monthly.group(1))
+        hour = int(monthly.group(2))
+        minute = int(monthly.group(3))
+        utc_hour = (hour + 3) % 24
+        return "cron", f"{minute:02d} {utc_hour:02d} {day} * *"
 
     delta = _DELTA_RE.match(raw)
     if delta:
@@ -132,6 +227,21 @@ def parse_schedule(
             seconds = amount
         return "once", (base + timedelta(seconds=seconds)).astimezone(UTC).isoformat()
 
+    # "a cada 30 minutos" / "a cada 2 horas" / "a cada 3 dias" / "a cada hora"
+    every_match = _EVERY_RE.match(raw)
+    if every_match:
+        amount = int(every_match.group("amount") or 1)
+        unit = (every_match.group("unit") or "hora").lower()
+        if unit.startswith("minuto") or unit == "min":
+            return "cron", f"*/{amount} * * * *"
+        elif unit.startswith("hora") or unit == "h":
+            # "a cada hora" vira */* 1 2 3...
+            return "cron", f"0 */{amount} * * *"
+        elif unit.startswith("dia"):
+            return "cron", f"0 0 */{amount} * *"
+        elif unit.startswith("semana"):
+            return "cron", f"0 0 * * */{amount}"
+
     try:
         from croniter import croniter
     except ImportError as exc:  # pragma: no cover
@@ -140,7 +250,8 @@ def parse_schedule(
         return "cron", raw
 
     raise ValueError(
-        f'Não entendi o horário "{text}". Use: "17:30", "todo dia 09:00", '
+        f'Não entendi o horário "{text}". Use: "17:30", "amanhã às 17:30", '
+        '"segunda às 09:00", "todo dia 09:00", "a cada 30 minutos", '
         '"2026-09-07 09:00", "em 30 minutos" ou uma expressão cron de 5 campos.'
     )
 

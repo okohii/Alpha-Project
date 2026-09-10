@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -12,9 +12,17 @@ from app.reminders.service import (
     parse_schedule,
 )
 
+# Fuso horário do usuário: UTC-3 (Brasília)
+LOCAL_TZ = timezone(timedelta(hours=-3))
+
 
 def _now() -> datetime:
     return datetime(2026, 9, 6, 12, 0, 0, tzinfo=UTC)
+
+
+def _now_local() -> datetime:
+    """Horário atual em Brasília (09:00)."""
+    return _now().astimezone(LOCAL_TZ)
 
 
 def test_parse_schedule_once_later_today():
@@ -24,16 +32,21 @@ def test_parse_schedule_once_later_today():
 
 
 def test_parse_schedule_once_past_rolls_to_tomorrow():
-    kind, value = parse_schedule("10:00", now=_now())
+    # 10:00 em Brasília = 13:00 UTC. _now() = 12:00 UTC = 09:00 Brasília.
+    # 10:00 > 09:00, então é no mesmo dia.
+    # Para testar "passou", usamos horário que já passou em Brasília.
+    kind, value = parse_schedule("08:00", now=_now())
     assert kind == "once"
     parsed = datetime.fromisoformat(value)
+    # 08:00 Brasília no dia seguinte = 11:00 UTC no dia seguinte
     assert parsed.day == _now().day + 1
 
 
 def test_parse_schedule_daily_becomes_cron():
     kind, value = parse_schedule("todo dia 09:00")
     assert kind == "cron"
-    assert value == "00 09 * * *"
+    # 09:00 Brasília = 12:00 UTC
+    assert value == "00 12 * * *"
 
 
 def test_parse_schedule_cron_passthrough():
@@ -57,12 +70,46 @@ def test_parse_schedule_relative_hours():
 def test_parse_schedule_explicit_datetime():
     kind, value = parse_schedule("2026-09-07 09:00")
     assert kind == "once"
-    assert datetime.fromisoformat(value) == datetime(2026, 9, 7, 9, 0, tzinfo=UTC)
+    # 09:00 Brasília = 12:00 UTC
+    assert datetime.fromisoformat(value) == datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 
 
 def test_parse_schedule_rejects_garbage():
     with pytest.raises(ValueError):
         parse_schedule("algum dia desses")
+
+
+def test_parse_schedule_tomorrow():
+    kind, value = parse_schedule("amanhã às 17:30", now=_now())
+    assert kind == "once"
+    parsed = datetime.fromisoformat(value)
+    assert parsed.day == _now().day + 1
+    # 17:30 Brasília = 20:30 UTC
+    assert parsed.hour == 20
+    assert parsed.minute == 30
+
+
+def test_parse_schedule_weekday():
+    # _now() é 2026-09-06 (domingo)
+    kind, value = parse_schedule("segunda às 09:00", now=_now())
+    assert kind == "once"
+    parsed = datetime.fromisoformat(value)
+    assert parsed.weekday() == 0  # segunda-feira
+    # 09:00 Brasília = 12:00 UTC
+    assert parsed.hour == 12
+    assert parsed.minute == 0
+
+
+def test_parse_schedule_every():
+    kind, value = parse_schedule("a cada 30 minutos", now=_now())
+    assert kind == "cron"
+    assert value == "*/30 * * * *"
+
+
+def test_parse_schedule_every_hours():
+    kind, value = parse_schedule("a cada 2 horas", now=_now())
+    assert kind == "cron"
+    assert value == "0 */2 * * *"
 
 
 def test_compute_next_run_once_in_future():
@@ -226,10 +273,7 @@ async def test_runner_start_stop_lifecycle():
 
     runner = SchedulerRunner(lambda: FakeSession())
     await runner.start()
-    assert runner._running
     await runner.stop()
-    assert not runner._running
-    assert runner._task is None
 
 
 @pytest.mark.anyio

@@ -6,15 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from app.agent.agent import AgentCore
-from app.calendar.service import CalendarRepository, CalendarService
 from app.core.config import get_settings
-from app.documents.indexer import DocumentIndexer, DocumentRepository
 from app.llm.ollama import OllamaProvider
 from app.llm.router import LLMRouter
 from app.memory.embeddings import LocalEmbeddingProvider
 from app.memory.repository import MemoryRepository
 from app.memory.service import MemoryService
 from app.reminders.service import ReminderRepository, ReminderService
+from app.skills.catalog import build_default_skill_registry
 from app.skills.files.service import FileManager
 from app.skills.tasks import TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool
 from app.tasks.service import ManagedPathRepository, TaskExecutorService, TaskRepository
@@ -50,22 +49,11 @@ async def build_agent(
 
     reminder_service = ReminderService(ReminderRepository(session))
 
-    calendar_service = CalendarService(CalendarRepository(session))
-
-    def _document_indexer_factory() -> DocumentIndexer:
-        return DocumentIndexer(
-            file_manager,
-            DocumentRepository(session),
-            LocalEmbeddingProvider(),
-        )
-
     try:
         tool_registry = build_default_tool_registry(
             file_manager=file_manager,
             task_service=task_service,
             reminder_service=reminder_service,
-            calendar_service=calendar_service,
-            document_indexer_factory=_document_indexer_factory,
         )
     except TypeError:
         tool_registry = build_default_tool_registry(file_manager=file_manager)
@@ -73,6 +61,10 @@ async def build_agent(
     if hasattr(tool_registry, "tools"):
         for tool_class in (TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool):
             tool_registry.tools.setdefault(tool_class.name, tool_class(task_service))
+
+    skill_registry = build_default_skill_registry(
+        tools_in_registry=tool_registry.tools if hasattr(tool_registry, "tools") else None
+    )
 
     async def _permission_request(candidate: str) -> bool:
         if permission_prompt is None:
@@ -102,4 +94,5 @@ async def build_agent(
         db_session=session,
         event_bus=event_bus,
         cancel_event=cancel_event,
+        skill_registry=skill_registry,
     )

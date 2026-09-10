@@ -249,6 +249,20 @@ def _build_parser() -> argparse.ArgumentParser:
     rem_del = rem_sub.add_parser("delete", parents=[common], help="remove um lembrete")
     rem_del.add_argument("reminder_id", help="identificador do lembrete")
 
+    macros = subparsers.add_parser(
+        "macros",
+        parents=[common],
+        help="gerencia macros de automação",
+    )
+    macros_sub = macros.add_subparsers(dest="macro_cmd", metavar="SUBCOMANDO")
+    macros_sub.add_parser("gui", parents=[common], help="abre a interface gráfica nativa de macros")
+    macros_sub.add_parser("list", parents=[common], help="lista macros")
+    macros_run = macros_sub.add_parser("run", parents=[common], help="executa uma macro")
+    macros_run.add_argument("name", help="nome da macro")
+    macros_run.add_argument(
+        "--params", default=None, help='JSON com parâmetros: \'{"message":"Oi"}\''
+    )
+
     calendar = subparsers.add_parser(
         "calendar",
         parents=[common],
@@ -441,6 +455,8 @@ async def _chat_once(
         except Exception as exc:
             print(f"[erro] {exc!r}", file=sys.stderr)
             return 1
+        # Iniciar schedulers mesmo em modo chat único
+        _start_scheduler_or_none()
         _print_agent_tools(agent)
         if as_json:
             _emit(result, True)
@@ -449,8 +465,8 @@ async def _chat_once(
             print(f"ALPHA: {response_text}")
             if result.get("memory_created"):
                 print("[memória criada]")
-            if voice_enabled:
-                await _speak_reply(VoicePipeline(), response_text)
+        if voice_enabled:
+            await _speak_reply(VoicePipeline(), response_text)
     return 0
 
 
@@ -671,19 +687,65 @@ async def _chat_interactive(
 
 
 async def _start_scheduler_or_none():
+    from app.notification import play_notification_sound, show_notification
     from app.reminders.runner import SchedulerRunner
 
     settings = get_settings()
     if not settings.scheduler_enabled:
         return None
+    
+    def on_notify(message: str) -> None:
+        play_notification_sound()
+        show_notification("ALPHA - Lembrete", message)
+        print(f"\n[lembrete] {message}\n", flush=True)
+    
     runner = SchedulerRunner(
         AsyncSessionLocal,
         interval_seconds=settings.scheduler_interval_seconds,
-        on_notify=lambda message: print(f"\n[lembrete] {message}\n", flush=True),
+        on_notify=on_notify,
     )
     await runner.start()
+    # Garante que os agendamentos de macros também disparem enquanto o chat
+    # estiver aberto (mesmo sem interação do usuário).
+    from app.macros.service import macro_service
+    try:
+        await macro_service.start_scheduler()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[aviso] falha ao iniciar agendador de macros: {exc}")
     print(f"[agendador ativo] verificação a cada {settings.scheduler_interval_seconds:.0f}s")
     return runner
+
+
+def _run_in_daemon_thread(func: Any) -> asyncio.Future[Any]:
+    """Executa func (blocking) numa thread daemon e devolve um Future.
+
+    Mantém o event loop livre para o agendador de lembretes/macros rodar
+    enquanto o usuário digita. A thread é daemon para não prender a saída
+    do processo se ficar bloqueada no input().
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[Any] = loop.create_future()
+
+    def _worker() -> None:
+        try:
+            value = func()
+        except BaseException as exc:  # noqa: BLE001 - repassa EOFError/KeyboardInterrupt
+            loop.call_soon_threadsafe(future.set_exception, exc)
+        else:
+            loop.call_soon_threadsafe(future.set_result, value)
+
+    threading.Thread(target=_worker, name="alpha-stdin", daemon=True).start()
+    return future
+
+
+async def _aio_prompt(prompt: str = "") -> str:
+    """Lê uma linha do stdin sem bloquear o event loop."""
+    return await _run_in_daemon_thread(lambda: input(prompt))
+
+
+async def _aio_prompt_user(renderer: TerminalRenderer) -> str:
+    """Lê o prompt do renderer (Rich) sem bloquear o event loop."""
+    return await _run_in_daemon_thread(renderer.prompt_user)
 
 
 async def _chat_interactive_loop(
@@ -714,8 +776,8 @@ async def _chat_interactive_loop(
         print(f"ALPHA {get_settings().app_name} - conversa interativa. Comandos: /sair, /q")
         while True:
             try:
-                raw = input("Você: ")
-            except EOFError:
+                raw = await _aio_prompt("Você: ")
+            except (EOFError, KeyboardInterrupt):
                 print()
                 break
             message = raw.strip()
@@ -768,7 +830,7 @@ async def _chat_terminal(
         renderer.rule("conversa")
         while True:
             try:
-                raw = renderer.prompt_user()
+                raw = await _aio_prompt_user(renderer)
             except (EOFError, KeyboardInterrupt):
                 renderer.console.print()
                 break
@@ -1141,6 +1203,49 @@ def _event_dict(view: object) -> dict[str, Any]:
     }
 
 
+async def _cmd_macros(args: argparse.Namespace) -> int:
+    from app.macros.service import macro_service
+
+    command = getattr(args, "macro_cmd", None) or "list"
+    if command == "gui":
+        from app.macros.gui import open_gui
+
+        open_gui()
+        return 0
+    if command == "run":
+        try:
+            macro = await macro_service.search_macro(args.name)
+            if not macro:
+                print(f"Macro '{args.name}' não encontrada.", file=sys.stderr)
+                return 1
+            params = json.loads(args.params) if args.params else {}
+            log = await macro_service.execute_macro(macro.id, params)
+            detail = f"{log.steps_executed}/{log.steps_total} passos"
+            print(f"Macro '{macro.name}' executada: {log.status} ({detail})")
+            if log.error:
+                print(f"Erro: {log.error}", file=sys.stderr)
+            return 0
+        except Exception as exc:
+            print(f"[erro] {exc!r}", file=sys.stderr)
+            return 1
+    macros = await macro_service.list_macros(enabled_only=False)
+    _emit(
+        [
+            {
+                "id": m.id,
+                "name": m.name,
+                "description": m.description,
+                "steps": len(m.steps),
+                "tags": m.tags,
+                "enabled": bool(m.enabled),
+            }
+            for m in macros
+        ],
+        args.as_json,
+    )
+    return 0
+
+
 async def _cmd_calendar(args: argparse.Namespace) -> int:
     from app.calendar.service import CalendarRepository, CalendarService
 
@@ -1193,6 +1298,8 @@ async def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -
         return await _cmd_reminders(args)
     if command == "calendar":
         return await _cmd_calendar(args)
+    if command == "macros":
+        return await _cmd_macros(args)
     if command == "voice":
         return await _cmd_voice(args)
     if command == "listen":

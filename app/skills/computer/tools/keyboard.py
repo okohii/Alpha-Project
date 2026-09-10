@@ -1,10 +1,9 @@
 """Controle de teclado no Windows: digitar texto e pressionar combinações de teclas."""
 
-from __future__ import annotations
-
 import ctypes
 import os
 import subprocess
+import time
 from typing import Any
 
 from app.skills.computer.service import ApplicationLauncher
@@ -17,7 +16,7 @@ KEYEVENTF_UNICODE = 0x0004
 VK_RETURN = 0x0D
 VK_TAB = 0x09
 
-
+# Estruturas para SendInput
 class _KEYBDINPUT(ctypes.Structure):
     _fields_ = [
         ("wVk", ctypes.c_ushort),
@@ -37,8 +36,28 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", ctypes.c_ulong), ("u", _INPUTUNION)]
 
 
+# GetForegroundWindow + GetWindowText para detectar a janela ativa real
+_user32 = ctypes.windll.user32
+_user32.GetForegroundWindow.restype = ctypes.c_void_p
+_user32.GetWindowTextW.restype = ctypes.c_int
+_user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+
+def _get_foreground_window_title() -> str | None:
+    """Retorna o título da janela em primeiro plano (None se não houver)."""
+    hwnd = _user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    length = _user32.GetWindowTextLengthW(hwnd)
+    if length <= 0:
+        return None
+    buf = ctypes.create_unicode_buffer(length + 1)
+    _user32.GetWindowTextW(hwnd, buf, length + 1)
+    title = buf.value.strip()
+    return title if title else None
+
+
 def _send_key(vk: int, scan: int, flags: int) -> None:
-    user32 = ctypes.windll.user32
     extra = ctypes.c_ulong(0)
     inp = _INPUT()
     inp.type = INPUT_KEYBOARD
@@ -46,7 +65,7 @@ def _send_key(vk: int, scan: int, flags: int) -> None:
     inp.ki.wScan = scan
     inp.ki.dwFlags = flags
     inp.ki.dwExtraInfo = ctypes.pointer(extra)
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+    _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
 def type_text(text: str) -> int:
@@ -64,6 +83,7 @@ def type_text(text: str) -> int:
             _send_key(0, ord(char), KEYEVENTF_UNICODE)
             _send_key(0, ord(char), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
         sent += 1
+        time.sleep(0.01)
     return sent
 
 
@@ -158,9 +178,11 @@ def press_sequence(sequence: str) -> int:
 class TypeTextTool(Tool):
     name = "type_text"
     description = (
-        "Digita texto na janela ativa do computador. Aceita acentos e '\n' para Enter. "
-        "Ex.: 'escreva olá mundo no bloco de notas'. Se passar 'app', tenta ativar a janela "
-        "do aplicativo antes de digitar."
+        "Digita texto na janela ativa do computador. Aceita acentos e '\\n' para Enter. "
+        "Ex.: 'escreva olá mundo no bloco de notas'. Se passar 'app', ativa a janela do "
+        "aplicativo ANTES de digitar; se a ativação falhar, a ferramenta FALHA e não digita "
+        "(para evitar digitar na janela errada). Sem 'app', digita na janela ativa e reporta "
+        "qual janela recebeu o texto."
     )
     permission = ToolPermission.write
 
@@ -174,22 +196,68 @@ class TypeTextTool(Tool):
                 name=self.name, success=False, data={}, error="Informe o texto a digitar."
             )
         window = str(kwargs.get("app", "") or "").strip()
-        focused = True
+
+        foreground = _get_foreground_window_title()
+        focused = False
+        activated = False
+
         if window:
+            target_names = [window]
             try:
                 info = self.launcher.resolve(window)
                 names = candidate_process_names(info.get("app", ""), info.get("path"))
-                focused = any(activate_window(candidate) for candidate in names)
+                target_names = names
             except ValueError:
-                activate_window(window)
+                pass
+
+            # Tenta ativar via AppActivate
+            activated = False
+            for candidate in target_names:
+                if activate_window(candidate):
+                    activated = True
+                    break
+
+            # Se AppActivate falhou, verifica se a janela já está em primeiro plano
+            # (AppActivate retorna False se a janela já estiver ativa)
+            if not activated:
+                foreground = _get_foreground_window_title()
+                if foreground and any(
+                    t.lower() in foreground.lower() or foreground.lower() in t.lower()
+                    for t in target_names
+                ):
+                    focused = True
+                else:
+                    return ToolResult(
+                        name=self.name,
+                        success=False,
+                        data={"window": window, "foreground": foreground},
+                        error=(
+                            f"Não consegui focar a janela do '{window}'. "
+                            "Verifique se o aplicativo está aberto e tente novamente."
+                        ),
+                    )
+            focused = True
+            activated = True
+        else:
+            # Sem app alvo: digita na janela ativa e reporta qual é
+            focused = foreground is not None
+            activated = False
+
         try:
             typed = type_text(text)
         except (OSError, RuntimeError) as exc:
             return ToolResult(name=self.name, success=False, data={}, error=str(exc))
+
         return ToolResult(
             name=self.name,
             success=True,
-            data={"typed_chars": typed, "window": window or "focused", "focused": focused},
+            data={
+                "typed_chars": typed,
+                "window": window or "active",
+                "focused": focused,
+                "activated": activated,
+                "foreground": foreground,
+            },
         )
 
     def parameters_schema(self) -> dict[str, Any]:

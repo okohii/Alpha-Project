@@ -105,7 +105,7 @@ class MemoryService:
         if memory_type == "preferencia":
             importance = 1.0
         elif tool_names:
-            importance = 0.75
+            importance = 0.85
         else:
             importance = 0.4
         content = build_episode_memory(user_message or "", response or "", tool_names)

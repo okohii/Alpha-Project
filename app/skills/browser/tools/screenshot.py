@@ -28,7 +28,7 @@ class BrowserScreenshotTool(Tool):
 
         driver = self._driver()
         try:
-            driver.start_browser()
+            await driver.start_browser()
             out_dir = self._output_dir or os.path.join(tempfile.gettempdir(), "alpha_shots")
             os.makedirs(out_dir, exist_ok=True)
             path = os.path.join(out_dir, f"browser_{uuid.uuid4().hex[:8]}.png")

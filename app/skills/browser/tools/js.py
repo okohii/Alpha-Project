@@ -25,7 +25,7 @@ class BrowserJsTool(Tool):
             )
         driver = self._driver()
         try:
-            driver.start_browser()
+            await driver.start_browser()
             value = await driver.evaluate(expression)
             return ToolResult(name=self.name, success=True, data={"result": value})
         except Exception as exc:

@@ -97,7 +97,7 @@ async def test_save_episode_keeps_tool_turns_above_threshold():
 
     assert saved is not None
     assert saved.memory_type == "semantic"
-    assert saved.importance == 0.75
+    assert saved.importance == 0.85
 
 
 @pytest.mark.anyio

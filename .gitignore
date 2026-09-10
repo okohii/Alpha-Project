@@ -73,3 +73,5 @@ logs/
 *.bak
 *.tmp
 *.temp
+
+alpha_startup.sh
