@@ -16,7 +16,14 @@ from app.core.events import EventBus, EventType, SystemEvent
 from app.llm.base import ExecutionEvidence, LLMMessage, LLMProvider, LLMResponse, ToolCall
 from app.llm.router import FaultTolerantProvider, LLMRouter
 from app.memory.service import MemoryService
-from app.security import AccessDeniedError
+from app.security import (
+    EXECUTE_TOOLS,
+    SENSITIVE_PREFIX,
+    AccessDeniedError,
+    SecurityDecision,
+    classify_action,
+    risk_requires_confirmation,
+)
 from app.skills.registry import SkillRegistry
 from app.tools.base import ToolPermission, ToolResult
 from app.tools.errors import ToolNotFoundError
@@ -42,7 +49,35 @@ FALLBACK_TOOLS = frozenset(
         "screenshot",
         "file_search",
         "file_read",
+        "web_search",
     }
+)
+
+# Ferramentas cujo resultado vem de fonte não confiável (conteúdo de páginas,
+# telas, arquivos ou execução de JS de terceiros). O resultado dessas tools é
+# marcado como não confiável para o modelo — os delimitadores no prompt evitam
+# prompt injection via conteúdo externo.
+UNTRUSTED_CONTENT_TOOLS = frozenset(
+    {
+        "browser_text",
+        "browser_html",
+        "browser_js",
+        "browser_click",
+        "browser_screenshot",
+        "web_search",
+        "read_ui",
+        "screenshot",
+        "verify_screen",
+        "file_read",
+        "file_search",
+        "file_write",
+    }
+)
+
+_FALLBACK_ON_NO_SUCCESS = (
+    "Não consegui concluir com evidência: as ferramentas necessárias falharam "
+    "ou não retornaram um resultado de sucesso. Verifique os erros relatados "
+    "e tente novamente."
 )
 
 
@@ -68,6 +103,8 @@ class AgentCore:
         event_bus: EventBus | None = None,
         cancel_event: asyncio.Event | None = None,
         skill_registry: SkillRegistry | None = None,
+        granted_permissions: set[ToolPermission] | None = None,
+        facilitator: Any | None = None,
     ) -> None:
         self.llm_router = llm_router
         self.tool_registry = tool_registry
@@ -79,12 +116,27 @@ class AgentCore:
         self.permission_request_handler = permission_request_handler
         self.allowed_directories_resolver = allowed_directories_resolver
         self.db_session = db_session
+        # Permissões pré-autorizadas. ``None`` = deriva por padrão seguro:
+        # leitura sempre; escrita apenas quando há interface de confirmação
+        # (ou flag explícita); sensíveis NUNCA entram aqui (são confirmadas
+        # por chamada em ``_execute_tool``).
+        self.granted_permissions = (
+            set(granted_permissions) if granted_permissions is not None else None
+        )
         self.events: list[SystemEvent] = []
         self._tools_used: list[str] = []
         self._evidence: list[dict[str, Any]] = []
+        # Trilha de auditoria de decisões de segurança do turno corrente.
+        self._security_log: list[dict[str, Any]] = []
         self.event_bus = event_bus
         self.cancel_event = cancel_event
         self.skill_registry = skill_registry
+        # Camada COMPREENDER (opcional): separa entendimento de execução.
+        # Quando presente, cumprimentos/perguntas simples respondem sem LLM e
+        # sem tools; intents ambíguos viram pergunta de esclarecimento. O
+        # Facilitator NUNCA executa tools nem decide segurança.
+        self.facilitator = facilitator
+        self._facilitator_goal: Any | None = None
 
     def _emit(
         self,
@@ -113,6 +165,7 @@ class AgentCore:
         conversation_id = conversation_id or str(uuid4())
         self._tools_used = []
         self._evidence = []
+        self._security_log = []
         self._emit(EventType.user_message, {"conversation_id": conversation_id})
         self._emit(EventType.agent_started, {"conversation_id": conversation_id})
         try:
@@ -152,6 +205,7 @@ class AgentCore:
         conversation_id = conversation_id or str(uuid4())
         self._tools_used = []
         self._evidence = []
+        self._security_log = []
         if self.event_bus is None:
             result = await self.chat(message, conversation_id)
             yield SystemEvent(
@@ -173,14 +227,36 @@ class AgentCore:
 
         task = asyncio.create_task(_task_fn())
         try:
+            # Drena a fila enquanto a task roda. A cada evento aguardado,
+            # observa a conclusão da task sem perder eventos já emitidos —
+            # evita a race entre ``task.done()`` e ``queue.get()`` que
+            # podia bloquear o stream indefinidamente.
+            while not task.done():
+                waiter = asyncio.create_task(queue.get())
+                try:
+                    done, _ = await asyncio.wait(
+                        {waiter, task}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if waiter in done:
+                        yield waiter.result()
+                    else:
+                        # Task concluiu antes de produzir o próximo evento.
+                        break
+                finally:
+                    if not waiter.done():
+                        waiter.cancel()
+                        try:
+                            await waiter
+                        except asyncio.CancelledError:
+                            pass
+
+            # Task concluída: drena eventos remanescentes emitidos antes de
+            # terminar e propaga exceções pendentes.
             while True:
                 try:
-                    event = queue.get_nowait()
+                    yield queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    if task.done():
-                        break
-                    event = await queue.get()
-                yield event
+                    break
             await task
             self._emit(
                 EventType.agent_finished,
@@ -188,7 +264,6 @@ class AgentCore:
                 duration_ms=_duration_ms(started_at),
             )
         except asyncio.CancelledError:
-            task.cancel()
             self._emit(
                 EventType.agent_cancelled,
                 {"conversation_id": conversation_id},
@@ -204,6 +279,14 @@ class AgentCore:
             raise
         finally:
             unsubscribe()
+            # Garante que a task em background não fica pendente se o
+            # consumidor parar antes (ex.: GeneratorExit por aclose()).
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except BaseException:
+                    pass
 
     async def _chat_impl(
         self,
@@ -212,6 +295,56 @@ class AgentCore:
         stream_tokens: bool = False,
     ) -> dict[str, Any]:
         conversation_id = conversation_id or str(uuid4())
+        provider = self.llm_router.choose(message)
+        # Build provider metadata for the response
+        provider_class = provider.__class__.__name__
+        provider_model = getattr(provider, "model", None)
+        provider_base = getattr(provider, "base_url", None)
+        if isinstance(provider, FaultTolerantProvider):
+            # prefer cloud metadata when available
+            cloud = getattr(provider, "cloud", None)
+            local = getattr(provider, "local", None)
+            provider_model = getattr(cloud, "model", None) or getattr(local, "model", None)
+            provider_base = getattr(cloud, "base_url", None) or getattr(local, "base_url", None)
+
+        # Camada COMPREENDER (opcional): cumprimentos/perguntas simples respondem
+        # sem LLM/sem tools; intents ambíguos pedem esclarecimento. Tudo que
+        # precisa de execução vira Goal para a camada EXECUTA (loop normal).
+        self._facilitator_goal = None
+        if self.facilitator is not None:
+            outcome = await self.facilitator.process(
+                self._facilitator_request(message, conversation_id)
+            )
+            if outcome.kind == "clarification":
+                self._emit(
+                    EventType.waiting_input,
+                    {"prompt": outcome.response},
+                )
+                return self._fast_result(
+                    response=outcome.response,
+                    conversation_id=conversation_id,
+                    provider_class=provider_class,
+                    provider_model=provider_model,
+                    provider_base=provider_base,
+                )
+            if outcome.kind == "direct":
+                direct = (outcome.response or "").strip()
+                self._emit(
+                    EventType.assistant_message,
+                    payload={"preview": direct[:120], "content": direct},
+                )
+                return self._fast_result(
+                    response=direct,
+                    conversation_id=conversation_id,
+                    provider_class=provider_class,
+                    provider_model=provider_model,
+                    provider_base=provider_base,
+                )
+            if outcome.goal is not None:
+                self._facilitator_goal = outcome.goal
+            else:
+                self._emit(EventType.agent_progress, {"message": outcome.intent.name})
+
         history: list[LLMMessage] = []
         if self.db_session is not None:
             await self._ensure_conversation(conversation_id, message)
@@ -237,19 +370,17 @@ class AgentCore:
                 if self._memory_context_line(memory)
             ]
 
-        provider = self.llm_router.choose(message)
-        # Build provider metadata for the response
-        provider_class = provider.__class__.__name__
-        provider_model = getattr(provider, "model", None)
-        provider_base = getattr(provider, "base_url", None)
-        if isinstance(provider, FaultTolerantProvider):
-            # prefer cloud metadata when available
-            cloud = getattr(provider, "cloud", None)
-            local = getattr(provider, "local", None)
-            provider_model = getattr(cloud, "model", None) or getattr(local, "model", None)
-            provider_base = getattr(cloud, "base_url", None) or getattr(local, "base_url", None)
-        system_prompt = self._build_system_prompt()
+        system_prompt = await self._build_system_prompt()
         messages = [LLMMessage(role="system", content=system_prompt)]
+        if self._facilitator_goal is not None:
+            try:
+                from app.assistant.facilitator import format_goal_context
+
+                messages.append(
+                    LLMMessage(role="system", content=format_goal_context(self._facilitator_goal))
+                )
+            except Exception:  # pragma: no cover - bloco opcional não quebra o chat
+                pass
         if profile_context:
             messages.append(
                 LLMMessage(
@@ -275,11 +406,7 @@ class AgentCore:
         messages.extend(history)
         messages.append(LLMMessage(role="user", content=message))
 
-        permissions = {
-            ToolPermission.read,
-            ToolPermission.write,
-            ToolPermission.sensitive,
-        }
+        permissions = self._permissions_for_turn()
         response, turn_messages = await self._run_agent_loop(
             provider,
             messages,
@@ -309,6 +436,7 @@ class AgentCore:
             "memory_created": memory_created,
             "tools_used": list(self._tools_used),
             "evidence": list(self._evidence),
+            "security_audit": list(self._security_log),
             "provider": {
                 "provider_class": provider_class,
                 "model": provider_model,
@@ -328,18 +456,18 @@ class AgentCore:
     ) -> tuple[LLMResponse, list[LLMMessage]]:
         """Executa o ciclo Agent ↔ Tools preservando o protocolo correto.
 
-        Para cada turno com ``tool_calls`` o modelo recebe:
+        A sequência enviada ao modelo é sempre:
 
             user -> assistant(tool_calls) -> tool(resultado) -> assistant(fim)
 
-        A mensagem ``assistant`` com as chamadas é mantida no histórico (ao
-        contrário do que acontecia), e os resultados das ferramentas são
-        registrados como ``ExecutionEvidence`` e injetados como contexto
-        observado no turno seguinte.
+        A mensagem ``assistant`` com as chamadas é preservada antes dos
+        resultados (pairing por ``tool_call_id``), repetições da mesma chamada
+        são bloqueadas e o limite ``AGENT_MAX_TOOL_ITERATIONS`` é respeitado.
         """
         allowed_names = self._initial_tool_names(task, permissions)
         evidence: list[ExecutionEvidence] = []
         new_messages: list[LLMMessage] = []
+        executed_signatures: set[str] = set()
 
         last_response = await self._provider_turn(
             provider, messages, self._schemas_for(allowed_names, permissions), stream_tokens
@@ -347,7 +475,8 @@ class AgentCore:
         iterations = 0
         while last_response.tool_calls and iterations < self.settings.agent_max_tool_iterations:
             self._raise_if_cancelled()
-            # Mantém a mensagem assistant que originou as chamadas.
+            # Mantém a mensagem assistant que originou as chamadas ANTES dos
+            # resultados das ferramentas — nunca tool(result) sem assistant(tool_calls).
             assistant_turn = LLMMessage(
                 role="assistant",
                 content=last_response.content or "",
@@ -358,6 +487,11 @@ class AgentCore:
 
             tool_messages: list[LLMMessage] = []
             for tool_call in last_response.tool_calls:
+                signature = self._call_signature(tool_call)
+                if signature in executed_signatures:
+                    tool_messages.append(self._repeated_call_message(tool_call))
+                    continue
+                executed_signatures.add(signature)
                 tool_msg, execution = await self._execute_tool(
                     tool_call, permissions, conversation_id, allowed_names
                 )
@@ -379,15 +513,48 @@ class AgentCore:
             )
             iterations += 1
 
-        final = LLMMessage(role="assistant", content=last_response.content)
+        content = last_response.content or ""
+        if not content and evidence and not any(item.success for item in evidence):
+            content = _FALLBACK_ON_NO_SUCCESS
+        final = LLMMessage(role="assistant", content=content)
         messages.append(final)
         new_messages.append(final)
         self._evidence = [item.to_dict() for item in evidence]
         self._emit(
             EventType.assistant_message,
-            payload={"preview": last_response.content[:120], "content": last_response.content},
+            payload={"preview": content[:120], "content": content},
         )
-        return last_response, new_messages
+        return LLMResponse(content=content, raw=last_response.raw), new_messages
+
+    @staticmethod
+    def _call_signature(tool_call: ToolCall) -> str:
+        args = json.dumps(
+            tool_call.arguments or {}, sort_keys=True, ensure_ascii=False, default=str
+        )
+        return f"{tool_call.name}:{args}"
+
+    def _repeated_call_message(self, tool_call: ToolCall) -> LLMMessage:
+        name = tool_call.name
+        self._emit(
+            EventType.tool_failed,
+            {
+                "tool": name,
+                "error": (
+                    f"chamada repetida de '{name}' com os mesmos argumentos no mesmo turno. "
+                    "Não repita: troque de estratégia."
+                ),
+            },
+        )
+        return self._tool_result_message(
+            name,
+            success=False,
+            response={},
+            error=(
+                f"'{name}' já foi chamada com os mesmos argumentos neste turno e não será "
+                "executada de novo. Explore outra abordagem ou peça nova instrução."
+            ),
+            tool_call_id=tool_call.id,
+        )
 
     async def _execute_tool(
         self,
@@ -396,10 +563,15 @@ class AgentCore:
         conversation_id: str | None,
         allowed_names: set[str],
     ) -> tuple[LLMMessage, ExecutionEvidence | None]:
+        self._raise_if_cancelled()
         try:
             tool = self.tool_registry.get(tool_call.name)
         except ToolNotFoundError:
             alternatives = sorted(n for n in allowed_names if n != tool_call.name)[:8]
+            self._emit(
+                EventType.tool_failed,
+                {"tool": tool_call.name, "error": "ferramenta inexistente"},
+            )
             return (
                 self._tool_result_message(
                     tool_call.name,
@@ -410,26 +582,60 @@ class AgentCore:
                         "Use apenas as ferramentas disponíveis neste turno."
                     ),
                     alternatives=alternatives or None,
+                    tool_call_id=tool_call.id,
                 ),
                 None,
             )
 
-        if tool.permission not in permissions:
-            return (
-                self._tool_result_message(
-                    tool.name,
-                    success=False,
-                    response={},
-                    error=(
-                        f"Uso negado: a ferramenta '{tool.name}' não está autorizada neste turno."
-                    ),
-                ),
-                None,
-            )
+        # Gate de permissão (least privilege):
+        # - observe/read: automático (autorização pré-concedida do turno);
+        # - write: depende do risco (medium/high exigem confirmação da
+        #   interface; low é automático);
+        # - execute/sensitive: confirmação obrigatória por chamada.
+        action = classify_action(tool.name, tool.permission)
+        needs_confirm = risk_requires_confirmation(tool.name, tool.permission)
+        decision = SecurityDecision(
+            action=action,
+            tool=tool.name,
+            permission_needed=tool.permission,
+            access_granted=sorted(p.value for p in permissions),
+            confirmation_required=needs_confirm,
+            decision="pending",
+            reason="",
+            result="not_executed",
+            arguments=dict(tool_call.arguments or {}),
+        )
 
-        if tool.permission is ToolPermission.sensitive:
-            confirmed = await self._confirm_sensitive(tool.name, tool_call.arguments)
-            if not confirmed:
+        confirmed: bool | None = None
+        deny_reason = ""
+        if needs_confirm:
+            if tool.permission is ToolPermission.sensitive or tool.name in EXECUTE_TOOLS:
+                confirmed = await self._confirm_sensitive(tool.name, tool_call.arguments)
+            else:
+                confirmed = await self._confirm_risk_write(tool.name, tool_call.arguments)
+            if confirmed is not True:
+                if (
+                    tool.permission is ToolPermission.sensitive
+                    or tool.name in EXECUTE_TOOLS
+                ):
+                    deny_reason = "uso sensível não confirmado pela interface"
+                    deny_message = "Uso negado pelo usuário (ferramenta sensível)."
+                elif self.permission_request_handler is None:
+                    deny_reason = "escrita de risco sem interface de confirmação"
+                    deny_message = (
+                        f"Uso negado: a ferramenta '{tool.name}' não está "
+                        "autorizada neste turno."
+                    )
+                else:
+                    deny_reason = "escrita de risco não confirmada pela interface"
+                    deny_message = "Uso negado pelo usuário."
+                decision.decision = "declined"
+                decision.reason = deny_reason
+                self._audit_decision(decision)
+                self._emit(
+                    EventType.tool_failed,
+                    {"tool": tool.name, "error": deny_reason},
+                )
                 self._emit(
                     EventType.tool_finished,
                     {"tool": tool.name, "success": False},
@@ -440,10 +646,82 @@ class AgentCore:
                         tool.name,
                         success=False,
                         response={},
-                        error="Uso negado pelo usuário (ferramenta sensível).",
+                        error=deny_message,
+                        tool_call_id=tool_call.id,
                     ),
                     None,
                 )
+            decision.decision = (
+                "confirmed" if self.permission_request_handler is not None else "auto_allowed"
+            )
+            decision.reason = "confirmação concedida pela interface"
+        elif tool.permission not in permissions:
+            decision.decision = "denied_not_authorized"
+            decision.reason = (
+                f"nível de permissão {tool.permission.value} não autorizado neste turno"
+            )
+            self._audit_decision(decision)
+            self._emit(
+                EventType.tool_failed,
+                {
+                    "tool": tool.name,
+                    "error": f"nível de permissão {tool.permission.value} não autorizado",
+                },
+            )
+            return (
+                self._tool_result_message(
+                    tool.name,
+                    success=False,
+                    response={},
+                    error=(
+                        f"Uso negado: a ferramenta '{tool.name}' não está autorizada neste turno."
+                    ),
+                    tool_call_id=tool_call.id,
+                ),
+                None,
+            )
+        else:
+            decision.decision = "allowed"
+            decision.reason = "ação autorizada com a permissão pré-concedida do turno"
+
+        if not isinstance(tool_call.arguments, dict):
+            decision.decision = "invalid_arguments"
+            decision.reason = "argumentos não são um objeto JSON"
+            self._audit_decision(decision)
+            self._emit(
+                EventType.tool_failed,
+                {"tool": tool.name, "error": "argumentos inválidos"},
+            )
+            return (
+                self._tool_result_message(
+                    tool.name,
+                    success=False,
+                    response={},
+                    error=f"Argumentos inválidos para '{tool.name}': esperava-se um objeto JSON.",
+                    tool_call_id=tool_call.id,
+                ),
+                None,
+            )
+
+        validation_error = self._validate_tool_arguments(tool, tool_call.arguments)
+        if validation_error:
+            decision.decision = "invalid_arguments"
+            decision.reason = validation_error
+            self._audit_decision(decision)
+            self._emit(
+                EventType.tool_failed,
+                {"tool": tool.name, "error": validation_error},
+            )
+            return (
+                self._tool_result_message(
+                    tool.name,
+                    success=False,
+                    response={},
+                    error=validation_error,
+                    tool_call_id=tool_call.id,
+                ),
+                None,
+            )
 
         started_at = time.perf_counter()
         self._emit(
@@ -470,14 +748,66 @@ class AgentCore:
                         # Encontrou macro correspondente - executa ela
                         macro_tool = self.tool_registry.get("macro_run")
                         if macro_tool:
+                            # macro_run é sensível: o auto-redirect NUNCA faz
+                            # bypass da confirmação exigida por chamada.
+                            confirmed = await self._confirm_sensitive(
+                                "macro_run", {"macro_id": macro.id}
+                            )
+                            if not confirmed:
+                                decision.decision = "declined"
+                                decision.reason = "macro sensível não confirmada no auto-redirect"
+                                decision.result = "not_executed"
+                                self._audit_decision(decision)
+                                self._emit(
+                                    EventType.tool_failed,
+                                    {"tool": tool.name, "error": "uso negado pelo usuário"},
+                                )
+                                self._emit(
+                                    EventType.tool_finished,
+                                    {"tool": tool.name, "success": False},
+                                    duration_ms=0,
+                                )
+                                return (
+                                    self._tool_result_message(
+                                        tool.name,
+                                        success=False,
+                                        response={},
+                                        error=(
+                                            "Uso negado pelo usuário "
+                                            "(ferramenta sensível)."
+                                        ),
+                                        tool_call_id=tool_call.id,
+                                    ),
+                                    None,
+                                )
+                            decision.decision = (
+                                "confirmed"
+                                if self.permission_request_handler is not None
+                                else "auto_allowed"
+                            )
+                            decision.reason = "macro confirmada via auto-redirect"
                             result = await macro_tool.execute(
                                 macro_id=macro.id
                             )
+                            decision.result = (
+                                "success" if result.success else "failure"
+                            )
+                            self._audit_decision(decision)
                             self._emit(
                                 EventType.tool_finished,
                                 {"tool": tool.name, "success": result.success},
                                 duration_ms=_duration_ms(started_at),
                             )
+                            if not result.success:
+                                self._emit(
+                                    EventType.tool_failed,
+                                    {
+                                        "tool": tool.name,
+                                        "error": str(result.error)
+                                        if result.error
+                                        else "macro falhou",
+                                    },
+                                )
                             self._tools_used.append(tool.name)
                             execution = ExecutionEvidence(
                                 action_id=str(uuid4())[:8],
@@ -493,13 +823,26 @@ class AgentCore:
                                 success=result.success,
                                 response=result.data or {},
                                 error=result.error,
+                                tool_call_id=tool_call.id,
+                                trusted=tool.name not in UNTRUSTED_CONTENT_TOOLS,
                             )
                             return msg, execution
             except Exception:
                 pass  # Se falhar, continua com a ferramenta original
 
         try:
-            result = await tool.execute(**tool_call.arguments)
+            result = await asyncio.wait_for(
+                tool.execute(**tool_call.arguments),
+                timeout=self.settings.agent_tool_timeout_seconds,
+            )
+        except TimeoutError:
+            result = ToolResult(
+                name=tool.name,
+                success=False,
+                data={},
+                error=f"a ferramenta {tool.name!r} excedeu o tempo máximo de "
+                f"{self.settings.agent_tool_timeout_seconds:.0f}s",
+            )
         except Exception as exc:
             result = ToolResult(
                 name=tool.name,
@@ -514,12 +857,42 @@ class AgentCore:
         ):
             granted = await self._request_permission(result.error.candidate)
             if granted:
-                result = await tool.execute(**tool_call.arguments)
+                try:
+                    result = await asyncio.wait_for(
+                        tool.execute(**tool_call.arguments),
+                        timeout=self.settings.agent_tool_timeout_seconds,
+                    )
+                except TimeoutError:
+                    result = ToolResult(
+                        name=tool.name,
+                        success=False,
+                        data={},
+                        error=f"a ferramenta {tool.name!r} excedeu o tempo máximo de "
+                        f"{self.settings.agent_tool_timeout_seconds:.0f}s",
+                    )
+                except Exception as exc:
+                    result = ToolResult(
+                        name=tool.name,
+                        success=False,
+                        data={},
+                        error=f"falha inesperada da ferramenta {tool.name!r}: {exc!r}",
+                    )
+        decision.result = "success" if result.success else "failure"
+        self._audit_decision(decision)
         self._emit(
             EventType.tool_finished,
             {"tool": tool.name, "success": result.success},
             duration_ms=_duration_ms(started_at),
         )
+        if not result.success:
+            self._emit(
+                EventType.tool_failed,
+                {
+                    "tool": tool.name,
+                    "error": str(result.error) if result.error else "falha desconhecida",
+                },
+                duration_ms=_duration_ms(started_at),
+            )
         self._tools_used.append(tool.name)
         await self._record_tool_execution(
             conversation_id,
@@ -543,9 +916,29 @@ class AgentCore:
                 success=result.success,
                 response=result.data or {},
                 error=str(result.error) if result.error else None,
+                tool_call_id=tool_call.id,
+                trusted=tool.name not in UNTRUSTED_CONTENT_TOOLS,
             ),
             execution,
         )
+
+    @staticmethod
+    def _validate_tool_arguments(tool: Any, arguments: dict[str, Any]) -> str | None:
+        """Valida os argumentos contra o schema da ferramenta antes de executar.
+
+        Retorna a descrição do erro ou ``None`` quando os argumentos são válidos.
+        """
+        schema = tool.schema()
+        function_schema = schema["function"] if isinstance(schema, dict) else {}
+        parameters = function_schema.get("parameters") or {}
+        required = parameters.get("required") or []
+        missing = [name for name in required if name not in arguments]
+        if missing:
+            return (
+                f"Argumentos inválidos para '{tool.name}': campos obrigatórios ausentes — "
+                + ", ".join(missing)
+            )
+        return None
 
     def _tool_result_message(
         self,
@@ -555,6 +948,8 @@ class AgentCore:
         response: dict[str, Any],
         error: str | None = None,
         alternatives: list[str] | None = None,
+        tool_call_id: str | None = None,
+        trusted: bool = True,
     ) -> LLMMessage:
         payload: dict[str, Any] = {
             "type": "function_response",
@@ -562,6 +957,8 @@ class AgentCore:
             "success": bool(success),
             "response": response or {},
             "error": error,
+            "tool_call_id": tool_call_id,
+            "trusted": bool(trusted),
         }
         if alternatives:
             payload["available_alternatives"] = alternatives
@@ -569,29 +966,71 @@ class AgentCore:
             role="tool", content=json.dumps(payload, ensure_ascii=False, default=str)
         )
 
+    def _permissions_for_turn(self) -> set[ToolPermission]:
+        """Deriva a autorização pré-concedida do turno.
+
+        ``read`` sempre é autorizado. ``write`` entrou apenas quando há
+        interface de confirmação interativa (handler) ou flag explícita.
+        ``sensitive`` nunca entra aqui: é confirmada por chamada.
+        """
+        if self.granted_permissions is not None:
+            return set(self.granted_permissions)
+        permissions = {ToolPermission.read}
+        if (
+            self.permission_request_handler is not None
+            or self.settings.agent_allow_write_default
+        ):
+            permissions.add(ToolPermission.write)
+        return permissions
+
     # ---- seleção de ferramentas por skill ----
+
+    def _can_expose_sensitive(self) -> bool:
+        """Há caminho para confirmar uso de ferramenta sensível?
+
+        Sensíveis só são anunciadas ao modelo quando existe interface de
+        confirmação (handler) ou autorização automática explícita. Sem esse
+        caminho, a exposição seria inútil e desnecessária.
+        """
+        return bool(
+            self.permission_request_handler is not None
+            or self.settings.agent_auto_approve_sensitive
+        )
+
+    def _advertised_permissions(
+        self, permissions: set[ToolPermission]
+    ) -> set[ToolPermission]:
+        """Permissões das tools que podem ser ANUNCIADAS neste turno.
+
+        Permissões pré-concedidas + sensíveis apenas quando há caminho de
+        confirmação. Aplica a política ANTES de expor a tool ao modelo.
+        """
+        advertised = set(permissions)
+        if self._can_expose_sensitive():
+            advertised.add(ToolPermission.sensitive)
+        return advertised
 
     def _initial_tool_names(
         self, task: str, permissions: set[ToolPermission]
     ) -> set[str]:
-        available = {tool.name for tool in self.tool_registry.list(permissions)}
+        advertised = self._advertised_permissions(permissions)
+        available = {tool.name for tool in self.tool_registry.list(advertised)}
         if self.skill_registry is None or not self.settings.agent_tool_selection:
             return set(available)
-        best_skill = self.skill_registry.best_skill_for_task(task)
-        if best_skill is None:
-            # Sem skill clara, empate no topo, ou par composto -> usa TODAS as skills casando
-            skills = self.skill_registry.skills_for_task(task)
-            names: set[str] = set()
-            for skill in skills:
-                names.update(self.skill_registry.get_tools_for_skills([skill.name]))
+        # Seleção determinística via SkillRegistry (sem chamada extra ao LLM).
+        skills = self.skill_registry.select_skills_for_task(
+            task, self.settings.agent_tool_selection_min_confidence
+        )
+        names: set[str] = set()
+        if skills:
+            names = set(
+                self.skill_registry.get_tools_for_skills(
+                    [skill.name for skill in skills]
+                )
+            )
             names &= available
-            if not names:
-                names = {name for name in FALLBACK_TOOLS if name in available}
-            names |= {name for name in CORE_TOOLS if name in available}
-            return names
-        names = set(self.skill_registry.get_tools_for_skills([best_skill.name]))
-        names &= available
         if not names:
+            # Fallback seguro: sem skill, baixa confiança ou tarefa genérica.
             names = {name for name in FALLBACK_TOOLS if name in available}
         names |= {name for name in CORE_TOOLS if name in available}
         return names
@@ -614,12 +1053,13 @@ class AgentCore:
         self, names: set[str], permissions: set[ToolPermission]
     ) -> list[dict[str, Any]]:
         schemas: list[dict[str, Any]] = []
+        advertised = self._advertised_permissions(permissions)
         for name in sorted(names):
             try:
                 tool = self.tool_registry.get(name)
             except ToolNotFoundError:
                 continue
-            if tool.permission in permissions:
+            if tool.permission in advertised:
                 schemas.append(tool.schema())
         return schemas
 
@@ -696,6 +1136,49 @@ class AgentCore:
             )
         return await provider.complete(messages, tools=tools)
 
+    def _confirmation_candidate(self, tool_name: str, arguments: dict) -> str:
+        """Candidato estruturado para confirmação de action no handler.
+
+        O prefixo ``SENSITIVE_PREFIX`` diferencia de forma inequívoca a
+        confirmação de action de candidatos que são caminhos de filesystem
+        (não depende de heurística de formato ``\": \"``).
+        """
+        rendered = json.dumps(arguments, ensure_ascii=False, default=str)
+        return f"{SENSITIVE_PREFIX}{tool_name}: {rendered}"
+
+    @staticmethod
+    def _facilitator_request(message: str, conversation_id: str | None) -> Any:
+        """Monta o Request para o Facilitator sem acoplar agent -> assistant."""
+        from app.assistant.intent import Request
+
+        return Request(text=message, conversation_id=conversation_id)
+
+    def _fast_result(
+        self,
+        *,
+        response: str,
+        conversation_id: str,
+        provider_class: str | None,
+        provider_model: Any,
+        provider_base: Any,
+    ) -> dict[str, Any]:
+        """Resposta rápida do Facilitator (sem LLM e sem tools) no schema do chat."""
+        return {
+            "response": response,
+            "conversation_id": conversation_id,
+            "memory_created": False,
+            "tools_used": [],
+            "evidence": [],
+            "security_audit": [],
+            "facilitator": True,
+            "provider": {
+                "provider_class": provider_class,
+                "model": provider_model,
+                "base_url": provider_base,
+                "mode": self.settings.llm_mode,
+            },
+        }
+
     async def _request_permission(self, candidate: str) -> bool:
         if self.permission_request_handler is None:
             return False
@@ -703,6 +1186,37 @@ class AgentCore:
             return await self.permission_request_handler(candidate)
         except Exception:
             return False
+
+    def _audit_decision(self, decision: SecurityDecision) -> None:
+        """Registra a decisão de segurança no log do turno e no barramento.
+
+        A auditoria é estrutural (não confia no LLM): quem emite é o próprio
+        gate de permissão, com os fatos que ele usou para decidir.
+        """
+        record = decision.to_dict()
+        self._security_log.append(record)
+        self._emit(
+            EventType.permission_decision,
+            {
+                "action": record["action"],
+                "tool": record["tool"],
+                "permission_needed": record["permission_needed"],
+                "decision": record["decision"],
+                "reason": record["reason"],
+                "result": record["result"],
+            },
+        )
+
+    async def _confirm_risk_write(self, tool_name: str, arguments: dict) -> bool:
+        """Pede confirmação para escrita de risco (medium/high).
+
+        Sem interface de confirmação (API sem handler) a escrita de risco é
+        negada: a ausência de interface não autoriza nada automaticamente.
+        """
+        if self.permission_request_handler is None:
+            return False
+        candidate = self._confirmation_candidate(tool_name, arguments)
+        return await self._request_permission(candidate)
 
     async def _confirm_sensitive(self, tool_name: str, arguments: dict) -> bool:
         """Pede confirmação antes de executar ferramenta sensível quando há handler.
@@ -713,7 +1227,7 @@ class AgentCore:
         """
         if self.permission_request_handler is None:
             return self.settings.agent_auto_approve_sensitive
-        candidate = f"{tool_name}: {json.dumps(arguments, ensure_ascii=False, default=str)}"
+        candidate = self._confirmation_candidate(tool_name, arguments)
         started_at = time.perf_counter()
         self._emit(
             EventType.waiting_confirmation,
@@ -797,9 +1311,15 @@ class AgentCore:
         user_message: str,
         turn_messages: list[LLMMessage],
     ) -> None:
-        """Persiste o turno completo: user + assistant(tool_calls) + tool + final."""
+        """Persiste user + assistant(tool_calls) + assistant(final).
+
+        Mensagens ``role="tool"`` NÃO são persistidas — a arquitetura
+        atual reconstrói o histórico a partir do assistant serializado.
+        """
         await self._save_message(conversation_id, "user", user_message)
         for message in turn_messages:
+            if message.role == "tool":
+                continue
             await self._save_message(
                 conversation_id, message.role, message.content, tool_calls=message.tool_calls
             )
@@ -818,7 +1338,11 @@ class AgentCore:
                 {
                     "content": content or "",
                     "tool_calls": [
-                        {"name": call.name, "arguments": call.arguments or {}}
+                        {
+                            "id": call.id,
+                            "name": call.name,
+                            "arguments": call.arguments or {},
+                        }
                         for call in tool_calls
                     ],
                 },
@@ -867,17 +1391,15 @@ class AgentCore:
         except Exception as exc:  # pragma: no cover
             logger.debug("Falha ao registrar execução de %s: %s", tool_name, exc)
 
-    def _build_system_prompt(self) -> str:
+    async def _build_system_prompt(self) -> str:
         system_prompt = self._load_system_prompt()
         project_context = self._project_context()
         if project_context:
             system_prompt = f"{system_prompt}\n\nContexto do projeto:\n{project_context}"
 
-        # Injeta lista de macros disponíveis no prompt
+        # Injeta lista de macros disponíveis no prompt (consulta async,
+        # sem bloquear o event loop com threads + .result()).
         try:
-            import asyncio
-            import concurrent.futures
-
             from sqlalchemy import select
 
             from app.db.session import AsyncSessionLocal
@@ -890,13 +1412,7 @@ class AgentCore:
                     )
                     return list(result.scalars().all())
 
-            try:
-                asyncio.get_running_loop()
-                # Já há um loop rodando - usa thread para rodar
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    macros = pool.submit(asyncio.run, _load_macros()).result()
-            except RuntimeError:
-                macros = asyncio.run(_load_macros())
+            macros = await _load_macros()
 
             if macros:
                 macro_lines = []

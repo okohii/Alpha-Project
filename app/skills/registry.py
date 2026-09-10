@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
 
@@ -47,24 +48,60 @@ class SkillRegistry:
         return matches[0] if matches else None
 
     def skills_for_task(self, task_description: str) -> list[Skill]:
-        """Retorna todas as skills cujas palavras-chave casam com o pedido."""
+        """Retorna TODAS as skills cujas palavras-chave casam, por relevância.
+
+        A ordem é decrescente de pontuação: skills com mais keywords na
+        descrição vêm primeiro (resolvers custom têm prioridade em empates).
+        """
+        return [skill for skill, _ in self.rank_skills_for_task(task_description)]
+
+    def rank_skills_for_task(self, task_description: str) -> list[tuple[Skill, int]]:
+        """Skills com pontuação de casamento, ordenada da mais provável.
+
+        Cada resolver custom que casa soma +1; cada keyword presente na
+        descrição soma +1. Resolvers são avaliados primeiro (desempate).
+        """
         normalized = (task_description or "").lower()
-        matches: list[Skill] = []
-        seen: set[str] = set()
+        scores: dict[str, int] = defaultdict(int)
         for resolver in self._resolvers:
             match = resolver(normalized)
-            if match and match.lower() not in seen:
-                skill = self._skills.get(match.lower())
-                if skill is not None:
-                    matches.append(skill)
-                    seen.add(skill.name.lower())
-        for skill in self._skills.values():
-            if skill.name.lower() in seen:
-                continue
-            if any(keyword in normalized for keyword in _skill_keywords(skill)):
-                matches.append(skill)
-                seen.add(skill.name.lower())
-        return matches
+            if match and match.lower() in self._skills:
+                scores[match.lower()] += 1
+        for name, skill in self._skills.items():
+            hits = sum(1 for kw in _skill_keywords(skill) if kw in normalized)
+            if hits:
+                scores[name] += hits
+        return sorted(
+            ((self._skills[name], score) for name, score in scores.items()),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+
+    def select_skills_for_task(
+        self,
+        task_description: str,
+        min_confidence: int = 1,
+    ) -> list[Skill]:
+        """Seleção determinística de skills relevantes para a tarefa.
+
+        Retorna as skills que devem ter suas ferramentas expostas ao modelo,
+        ou lista vazia quando o fallback seguro deve ser usado:
+
+        - nenhuma skill casou (tarefa genérica/desconhecida);
+        - nenhuma skill atingiu ``min_confidence`` (baixa confiança);
+        - empate fraco no piso (várias skills com um único hit genérico).
+        """
+        ranked = self.rank_skills_for_task(task_description)
+        if not ranked:
+            return []
+        if ranked[0][1] < min_confidence:
+            return []
+        matched = [skill for skill, score in ranked if score >= 1]
+        # Empate no piso com várias skills distintas e nenhum sinal forte
+        # (score > 1) = baixa confiança -> fallback seguro.
+        if len(matched) > 1 and all(score == 1 for _, score in ranked):
+            return []
+        return matched
 
     def best_skill_for_task(self, task_description: str) -> Skill | None:
         """Retorna a skill com MAIS keywords casando (desambiguação).
@@ -72,22 +109,12 @@ class SkillRegistry:
         Se houver empate entre skills, retorna None para sinalizar que o chamador
         deve usar ferramentas de TODAS as skills empatadas no topo.
         """
-        skills = self.skills_for_task(task_description)
-        if not skills:
+        ranked = self.rank_skills_for_task(task_description)
+        if not ranked:
             return None
-        if len(skills) == 1:
-            return skills[0]
-        # Conta matches por skill (usa nome como chave)
-        normalized = (task_description or "").lower()
-        scores: dict[str, int] = {}
-        for skill in skills:
-            scores[skill.name] = sum(1 for kw in _skill_keywords(skill) if kw in normalized)
-        max_score = max(scores.values())
-        top_names = [name for name, sc in scores.items() if sc == max_score]
-        if len(top_names) == 1:
-            return self._skills[top_names[0].lower()]
-        # Empate no topo: retorna None para o chamador combinar as top skills
-        return None
+        top_score = ranked[0][1]
+        top = [skill for skill, score in ranked if score == top_score]
+        return top[0] if len(top) == 1 else None
 
     def skill_for_tool(self, tool_name: str) -> str | None:
         return self._tool_to_skill.get(tool_name)
@@ -118,6 +145,7 @@ def _skill_keywords(skill: Skill) -> list[str]:
             "slack", "discord", "telegram", "instagram", "facebook", "twitter",
             "x.com", "linkedin", "gmail", "outlook", "drive.google", "google drive",
             "netflix", "prime video", "primevideo", "spotify", "twitch",
+            "vídeo", "videos", "assistir", "pesquisar no site", "pesquisar no google",
         ],
         "files": [
             "arquivo", "pasta", "diretório", "diretorio",
@@ -136,8 +164,9 @@ def _skill_keywords(skill: Skill) -> list[str]:
             "preferência", "preferencia", "esquecer", "perfil",
         ],
         "web": [
-            "pesquisar", "pesquisa", "buscar na internet",
-            "notícia", "noticia", "google", "web",
+            "pesquisar", "pesquisa", "buscar na internet", "procurar", "procura",
+            "procure", "busque", "notícia", "noticia", "google", "web",
+            "vídeo", "videos", "assistir",
         ],
         "system": ["hora", "status", "sistema", "configuração", "configuracao", "tempo"],
         "reminders": [

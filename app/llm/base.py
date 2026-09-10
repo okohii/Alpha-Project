@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
+from uuid import uuid4
+
+
+def _new_call_id() -> str:
+    return f"call_{uuid4().hex[:8]}"
 
 
 @dataclass(slots=True)
 class ToolCall:
     name: str
     arguments: dict[str, Any]
+    id: str = field(default_factory=_new_call_id)
 
 
 @dataclass(slots=True)

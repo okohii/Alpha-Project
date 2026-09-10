@@ -72,3 +72,47 @@ def test_default_registry_maps_known_tools_to_skills():
     assert registry.skill_for_tool("web_search") == "Web"
     assert registry.skill_for_tool("file_read") == "Files"
     assert registry.skill_for_tool("open_app") == "Computer"
+
+
+def test_rank_skills_for_task_sorts_by_score():
+    registry = build_default_skill_registry()
+    ranked = registry.rank_skills_for_task("liste os arquivos da minha pasta downloads")
+    assert ranked
+    top_skill, top_score = ranked[0]
+    assert top_skill.name == "Files"
+    assert top_score >= 3
+    scores = [score for _, score in ranked]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_select_skills_for_task_clear_winner():
+    registry = build_default_skill_registry()
+    skills = registry.select_skills_for_task("liste os arquivos da pasta downloads")
+    assert [s.name for s in skills] == ["Files"]
+
+
+def test_select_skills_for_task_compound_browser_web():
+    registry = build_default_skill_registry()
+    skills = registry.select_skills_for_task(
+        "Abra o YouTube e procure vídeos de Python."
+    )
+    assert {s.name for s in skills} == {"Browser", "Web"}
+
+
+def test_select_skills_for_task_no_match_returns_empty():
+    registry = build_default_skill_registry()
+    assert registry.select_skills_for_task("conte uma piada divertida") == []
+
+
+def test_select_skills_for_task_low_confidence_weak_tie():
+    registry = build_default_skill_registry()
+    # "documento" casa com Files e Documents num único hit cada -> ambíguo.
+    assert registry.select_skills_for_task("preciso encontrar um documento") == []
+
+
+def test_select_skills_for_task_min_confidence_gate():
+    registry = build_default_skill_registry()
+    # "hora" só casa com System (1 hit).
+    assert [s.name for s in registry.select_skills_for_task("que horas são?")] == ["System"]
+    # Com min_confidence=2, um único hit é tratado como baixa confiança.
+    assert registry.select_skills_for_task("que horas são?", min_confidence=2) == []

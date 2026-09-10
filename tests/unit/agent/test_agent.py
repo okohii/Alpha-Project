@@ -230,6 +230,7 @@ async def test_agent_survives_unexpected_tool_exception():
         llm_router=LLMRouter(local_provider=provider, cloud_provider=provider),
         tool_registry=ToolRegistry(tools={"worker": ExplodingTool()}),
         memory_service=FakeMemoryService(),
+        permission_request_handler=lambda _: True,
     )
 
     result = await agent.chat("faça")

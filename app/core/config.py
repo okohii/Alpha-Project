@@ -74,10 +74,20 @@ class Settings(BaseSettings):
     memory_min_importance: float = 0.70
     rag_top_k: int = 5
     agent_max_tool_iterations: int = 8
+    # Timeout por execução de ferramenta: evita que uma tool travada
+    # segure o turno do agente indefinidamente.
+    agent_tool_timeout_seconds: float = 60.0
 
     # Seleção de ferramentas por Skill: expõe apenas as ferramentas da(s)
     # skill(s) relacionada(s) ao pedido, em vez de todo o catálogo.
     agent_tool_selection: bool = True
+    # Confiança mínima (nº de keywords na descrição) para uma skill ser
+    # selecionada. Abaixo do limiar, cai no fallback seguro.
+    agent_tool_selection_min_confidence: int = 1
+    # Autoriza por padrão ferramentas de escrita (escrever arquivos, teclado,
+    # clique, automação) mesmo sem interface de confirmação interativa.
+    # Por padrão, sem handler de confirmação o Agent só executa 'read'.
+    agent_allow_write_default: bool = False
     # Sem interface de confirmação (ex.: API), ferramentas sensíveis ficam
     # negadas por padrão; habilite apenas se quiser autorização automática.
     agent_auto_approve_sensitive: bool = False

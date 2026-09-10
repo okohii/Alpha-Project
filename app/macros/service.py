@@ -594,6 +594,10 @@ class MacroService:
             else:
                 run_at = datetime.fromisoformat(schedule_value)
         
+        brasilia_tz = timezone(timedelta(hours=-3))
+        if run_at and run_at.tzinfo is not None:
+            run_at = run_at.astimezone(brasilia_tz).replace(tzinfo=None)
+            
         if not cron_expression and not run_at:
             raise ValueError("Informe cron_expression, run_at ou schedule_text")
 
@@ -607,7 +611,7 @@ class MacroService:
 
         # Converte para fuso de Brasília (UTC-3)
         if next_run:
-            next_run = next_run.astimezone(timezone(timedelta(hours=-3)))
+            next_run = next_run.astimezone(timezone(timedelta(hours=-3))).replace(tzinfo=None)
 
         async with AsyncSessionLocal() as session:
             schedule = MacroScheduleRecord(
@@ -638,7 +642,8 @@ class MacroService:
             # dispara em horário errado.
             trigger = CronTrigger.from_crontab(schedule.cron_expression, timezone=UTC)
         elif schedule.run_at:
-            trigger = DateTrigger(run_date=schedule.run_at)
+            brasilia_tz = timezone(timedelta(hours=-3))
+            trigger = DateTrigger(run_date=schedule.run_at, timezone=brasilia_tz)
         else:
             return
 
@@ -655,7 +660,7 @@ class MacroService:
 
     async def _update_next_run(self, schedule_id: str, next_run: datetime) -> None:
         brasilia_tz = timezone(timedelta(hours=-3))
-        next_run = next_run.astimezone(brasilia_tz) if next_run else None
+        next_run = next_run.astimezone(brasilia_tz).replace(tzinfo=None) if next_run else None
         async with AsyncSessionLocal() as session:
             schedule = await session.get(MacroScheduleRecord, schedule_id)
             if schedule:
@@ -746,6 +751,10 @@ class MacroService:
                 run_at = datetime.fromisoformat(schedule_value)
                 cron_expression = None
 
+        brasilia_tz = timezone(timedelta(hours=-3))
+        if run_at and run_at.tzinfo is not None:
+            run_at = run_at.astimezone(brasilia_tz).replace(tzinfo=None)
+            
         if not cron_expression and not run_at:
             raise ValueError("Informe cron_expression, run_at ou schedule_text")
 
@@ -758,7 +767,7 @@ class MacroService:
 
         brasilia_tz = timezone(timedelta(hours=-3))
         if next_run:
-            next_run = next_run.astimezone(brasilia_tz)
+            next_run = next_run.astimezone(brasilia_tz).replace(tzinfo=None)
 
         async with AsyncSessionLocal() as session:
             schedule = await session.get(MacroScheduleRecord, schedule_id)

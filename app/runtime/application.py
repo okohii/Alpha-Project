@@ -13,6 +13,7 @@ from app.memory.embeddings import LocalEmbeddingProvider
 from app.memory.repository import MemoryRepository
 from app.memory.service import MemoryService
 from app.reminders.service import ReminderRepository, ReminderService
+from app.security import SENSITIVE_PREFIX
 from app.skills.catalog import build_default_skill_registry
 from app.skills.files.service import FileManager
 from app.skills.tasks import TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool
@@ -67,11 +68,36 @@ async def build_agent(
     )
 
     async def _permission_request(candidate: str) -> bool:
+        """Handler único de confirmação de permissão.
+
+        Dois fluxos distintos passam por aqui, diferenciados por um prefixo
+        estrutural (NÃO por heurística de formato):
+
+        1. Confirmação de action      → candidate inicia com ``SENSITIVE_PREFIX``
+           (tools sensíveis/arriscadas: ``"tool_name: {args_json}"``). O prefixo
+           é removido para exibição na interface e NÃO deve poluir o whitelist
+           de diretórios nem ser persistido no banco.
+
+        2. AccessDeniedError         → candidate é um caminho de filesystem
+           (ex.: ``C:/Users/foo/Downloads``). Só então é adicionado ao
+           whitelist de diretórios autorizados e persistido.
+
+        Nunca é o conteúdo/NUNCA o LLM que decide: a interface (handler) é a
+        única fonte de autorização.
+        """
         if permission_prompt is None:
             return False
-        granted = await permission_prompt(candidate)
+        is_action_confirmation = candidate.startswith(SENSITIVE_PREFIX)
+        display = (
+            candidate[len(SENSITIVE_PREFIX) :]
+            if is_action_confirmation
+            else candidate
+        )
+        granted = await permission_prompt(display)
         if not granted:
             return False
+        if is_action_confirmation:
+            return True
         normalized = Path(candidate).expanduser().resolve()
         if normalized not in file_manager.allowed_directories:
             file_manager.allowed_directories.append(normalized)

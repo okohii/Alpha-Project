@@ -8,7 +8,7 @@ from app.tools.base import Tool, ToolPermission, ToolResult
 class TaskRegisterPathTool(Tool):
     name = "task_register_path"
     description = "Registra um diretório ou arquivo permitido para uso do executor de tarefas."
-    permission = ToolPermission.write
+    permission = ToolPermission.sensitive
 
     def __init__(self, task_service: Any) -> None:
         self.task_service = task_service

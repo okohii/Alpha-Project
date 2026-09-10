@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.llm.base import LLMMessage, LLMResponse, ToolCall
+from app.llm.base import LLMMessage, LLMResponse
 from app.llm.mock import MockLLMProvider
 from app.llm.ollama import parse_tool_calls
 from app.llm.router import LLMRouter
@@ -25,7 +25,22 @@ def test_parse_tool_calls():
     tool_calls = parse_tool_calls(
         [{"function": {"name": "time", "arguments": {"timezone": "UTC"}}}]
     )
-    assert tool_calls == [ToolCall(name="time", arguments={"timezone": "UTC"})]
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "time"
+    assert tool_calls[0].arguments == {"timezone": "UTC"}
+    assert tool_calls[0].id.startswith("call_")
+
+
+def test_parse_tool_calls_uses_provided_id():
+    tool_calls = parse_tool_calls(
+        [
+            {
+                "id": "call_abc",
+                "function": {"name": "time", "arguments": {"timezone": "UTC"}},
+            }
+        ]
+    )
+    assert tool_calls[0].id == "call_abc"
 
 
 def test_gemini_provider_returns_content_from_api(monkeypatch):

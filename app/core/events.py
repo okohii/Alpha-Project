@@ -25,6 +25,7 @@ class EventType(StrEnum):
     tool_selected = "tool_selected"
     tool_started = "tool_started"
     tool_finished = "tool_finished"
+    tool_failed = "tool_failed"
     skill_started = "skill_started"
     skill_finished = "skill_finished"
     # percepção
@@ -34,6 +35,7 @@ class EventType(StrEnum):
     waiting_confirmation = "waiting_confirmation"
     waiting_confirmation_end = "waiting_confirmation_end"
     waiting_input = "waiting_input"
+    permission_decision = "permission_decision"
     # tarefa
     task_created = "task_created"
     task_step_completed = "task_step_completed"
@@ -53,6 +55,7 @@ PROGRESS_EVENTS = (
     EventType.tool_selected,
     EventType.tool_started,
     EventType.tool_finished,
+    EventType.tool_failed,
     EventType.perception_started,
     EventType.perception_completed,
     EventType.waiting_confirmation,
