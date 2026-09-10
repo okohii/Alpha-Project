@@ -37,6 +37,10 @@ class Task:
     observations: list[str] = field(default_factory=list)
     iterations: int = 0
     max_iterations: int = 0
+    plan_id: str | None = None
+    plan_step_ids: list[str] | None = None
+    priority: str | None = None
+    expected_result: str | None = None
     result: Any = None
     error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))

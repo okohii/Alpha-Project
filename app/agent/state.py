@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
 from app.agent.task import Task, TaskStatus, TaskStep
 from app.core.events import EventBus, EventType
+
+
+class AgentState(StrEnum):
+    idle = "idle"
+    understanding = "understanding"
+    planning = "planning"
+    executing = "executing"
+    waiting_confirmation = "waiting_confirmation"
+    waiting_input = "waiting_input"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
 
 
 class TaskEngine:
@@ -21,6 +34,7 @@ class TaskEngine:
         self.max_iterations = max_iterations
         self._tasks: dict[str, Task] = {}
         self._order: list[str] = []
+        self.agent_state: AgentState | None = AgentState.idle
 
     def start(self, goal: str, max_iterations: int | None = None) -> Task:
         task = Task(

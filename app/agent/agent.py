@@ -105,6 +105,7 @@ class AgentCore:
         skill_registry: SkillRegistry | None = None,
         granted_permissions: set[ToolPermission] | None = None,
         facilitator: Any | None = None,
+        planner: Any | None = None,
     ) -> None:
         self.llm_router = llm_router
         self.tool_registry = tool_registry
@@ -136,6 +137,7 @@ class AgentCore:
         # sem tools; intents ambíguos viram pergunta de esclarecimento. O
         # Facilitator NUNCA executa tools nem decide segurança.
         self.facilitator = facilitator
+        self.planner = planner
         self._facilitator_goal: Any | None = None
 
     def _emit(
@@ -344,6 +346,11 @@ class AgentCore:
                 self._facilitator_goal = outcome.goal
             else:
                 self._emit(EventType.agent_progress, {"message": outcome.intent.name})
+
+        if self._facilitator_goal is not None and self.planner is not None:
+            from app.agent.planner import Planner as _Planner
+
+            self._plan = _Planner().build_plan(self._facilitator_goal)
 
         history: list[LLMMessage] = []
         if self.db_session is not None:

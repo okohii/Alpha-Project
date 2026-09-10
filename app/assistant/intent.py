@@ -98,12 +98,18 @@ class Goal:
     intent: Intent
     tasks: list[Task] = field(default_factory=list)
     original_text: str = ""
+    priority: str = "normal"
+    state: str = "pending"
+    expected_result: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "intent": self.intent.to_dict(),
             "tasks": [task.__dict__ for task in self.tasks],
             "original_text": self.original_text,
+            "priority": self.priority,
+            "state": self.state,
+            "expected_result": self.expected_result,
         }
 
 
