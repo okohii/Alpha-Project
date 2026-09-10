@@ -1,5 +1,6 @@
 """Provedor de visão local (Ollama) para descrever capturas de tela em texto."""
 from __future__ import annotations
+from dataclasses import dataclass, field
 
 import base64
 import logging
@@ -61,3 +62,42 @@ class OllamaVisionProvider:
         content = (data.get("message", {}) or {}).get("content", "")
         description = content.strip()
         return description[:max_chars] if max_chars else description
+
+@dataclass(slots=True)
+class VisionPerceptor:
+    """Perceptor de visão (último recurso quando fontes estruturadas são insuficientes)."""
+    _verifier: Any | None = field(default=None, repr=False)
+    
+    def _ensure_verifier(self) -> OllamaVisionVerifier:
+        if self._verifier is None:
+            from app.perception.vision import get_vision_verifier
+            self._verifier = get_vision_verifier()
+        return self._verifier
+    
+    def perceive(self, image_path: str, goal: str, *,
+                 max_retries: int = 0, retry_delay: float = 2.0) -> Evidence:
+        verifier = self._ensure_verifier()
+        result = asyncio.run(
+            verifier.verify(image_path, goal, max_retries=max_retries, retry_delay=retry_delay)
+        )
+        achieved = result.get('achieved')
+        confidence = result.get('confidence', 0.0)
+        feedback = result.get('feedback', '')
+        if achieved is True:
+            return Evidence(
+                kind=EvidenceKind.VISION,
+                tool_result={'achieved': True, 'confidence': confidence, 'feedback': feedback},
+                success=True,
+            )
+        elif achieved is False:
+            return Evidence(
+                kind=EvidenceKind.VISION,
+                tool_result={'achieved': False, 'confidence': confidence, 'feedback': feedback},
+                success=False,
+            )
+        else:
+            return Evidence(
+                kind=EvidenceKind.VISION,
+                tool_result={'achieved': None, 'confidence': confidence, 'feedback': feedback or 'visão inconclusiva'},
+                success=None,
+            )

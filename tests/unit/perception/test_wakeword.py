@@ -1,4 +1,7 @@
 from __future__ import annotations
+from dataclasses import dataclass
+from enum import StrEnum
+
 
 from app.perception.wakeword import find_wake_word, normalize, strip_wake_word
 
