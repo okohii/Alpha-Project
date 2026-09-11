@@ -1,196 +1,144 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import tempfile
 from pathlib import Path
-from abc import ABC, abstractmethod
-from typing import Callable, Optional
 
-from kokoro import KPipeline
+import numpy as np
 import soundfile as sf
+from kokoro import KPipeline
 
 from app.core.config import get_settings
 
-try:
-    from kokoro_ml import KokoroVoice
-except Exception:  # pragma: no cover
-    KokoroVoice = None
-
 
 class TextToSpeechError(RuntimeError):
+    """Erro relacionado à síntese de voz."""
+
     pass
 
 
-class TextToSpeech(ABC):
-    @abstractmethod
+class TextToSpeech:
+    """Interface base para mecanismos de Text-to-Speech."""
+
     async def synthesize(self, text: str) -> Path:
         raise NotImplementedError
 
 
 class KokoroTTS(TextToSpeech):
+    """
+    Implementação de TTS usando Kokoro-82M.
+
+    O Kokoro é o mecanismo padrão de voz do ALPHA.
+    """
+
     def __init__(self) -> None:
         self.settings = get_settings()
-        self._voice: Optional[object] = None
-        self._pipeline = KPipeline(lang_code='a')
+
+        try:
+            self._pipeline = KPipeline(lang_code="p")
+        except Exception as exc:
+            raise TextToSpeechError(
+                f"Falha ao inicializar o Kokoro: {exc}"
+            ) from exc
+
+        # Voz padrão do Kokoro.
+        #
+        # Pode ser alterada posteriormente para uma configuração
+        # como KOKORO_VOICE no .env.
+        self.voice = "pf_dora"
+
+        self.sample_rate = 24000
 
     async def synthesize(self, text: str) -> Path:
-        """Synthesize speech from text using Kokoro.
-
-        Returns:
-            Path to a WAV file containing the synthesized speech.
         """
+        Gera um arquivo WAV usando o Kokoro.
+
+        A geração é executada em uma thread para não bloquear
+        o event loop principal do ALPHA.
+        """
+
+        if not text or not text.strip():
+            raise TextToSpeechError(
+                "Não é possível sintetizar texto vazio."
+            )
+
         try:
-            temp_dir = Path(tempfile.mkdtemp(prefix="alpha-tts-"))
-            output_path = temp_dir / "speech.wav"
+            return await asyncio.to_thread(
+                self._synthesize,
+                text.strip(),
+            )
 
-            generator = self._pipeline(text, voice='af_heart')
-            audio_chunks = []
-            for i, (gs, ps, audio) in enumerate(generator):
-                audio_chunks.append(audio)
-
-            if not audio_chunks:
-                raise TextToSpeechError("Nenhum audio gerado")
-
-            # Concatenate all audio chunks
-            import numpy as np
-            full_audio = np.concatenate(audio_chunks)
-
-            # Write to WAV file
-            sf.write(str(output_path), full_audio, 24000)
+        except TextToSpeechError:
+            raise
 
         except Exception as exc:
-            raise TextToSpeechError(f"Falha na sintetizacao Kokoro: {exc}") from exc
+            raise TextToSpeechError(
+                f"Falha na síntese Kokoro: {exc}"
+            ) from exc
 
-        if not output_path.exists():
-            raise TextToSpeechError("Kokoro nao gerou audio")
-        return output_path
-
-    def stream_synthesize(self, text: str, on_chunk: Callable[[bytes], None]) -> None:
-        """Stream synthesis chunks as they are generated.
-
-        Args:
-            text: The text to synthesize.
-            on_chunk: Callback receiving audio bytes chunks.
+    def _synthesize(self, text: str) -> Path:
         """
-        if self._voice is None and KokoroVoice is not None:
-            model_path = (
-                self.settings.tts_voice
-                or os.environ.get("KOKORO_MODEL")
-                or "hexgrad/Kokoro-82M"
+        Executa a síntese síncrona do Kokoro.
+        """
+
+        temp_dir = Path(
+            tempfile.mkdtemp(
+                prefix="alpha-kokoro-"
             )
-            try:
-                self._voice = KokoroVoice(model_path)
-            except Exception:
-                return
-
-        if self._voice is not None:
-            try:
-                chunks = self._voice.stream_synthesize(text)
-                for chunk in chunks:
-                    on_chunk(chunk)
-            except Exception:
-                pass
-
-
-class PiperTTS(TextToSpeech):
-    def __init__(self) -> None:
-        self.settings = get_settings()
-        self._voice = None
-        self.piper_executable = (
-            os.environ.get("PIPER_BIN")
-            or os.environ.get("PIPER_EXECUTABLE")
-            or shutil.which("piper")
-            or shutil.which("piper.exe")
-            or r"C:\piper\piper.exe"
-        )
-        self.model_path = (
-            self.settings.tts_voice
-            or os.environ.get("PIPER_MODEL")
-            or r"C:\piper\models\pt_BR\cadu\medium\pt_BR-cadu-medium.onnx"
         )
 
-    async def synthesize(self, text: str) -> Path:
-        if not self.model_path:
-            raise TextToSpeechError("Modelo de voz do Piper não configurado")
-
-        model_path = Path(self.model_path).expanduser()
-        if not model_path.exists():
-            raise TextToSpeechError(f"Modelo de voz do Piper não encontrado: {model_path}")
-
-        if PiperVoice is not None:
-            try:
-                return await asyncio.to_thread(self._synthesize_with_library, text, model_path)
-            except TextToSpeechError:
-                raise
-            except Exception as exc:  # pragma: no cover
-                if not self.piper_executable:
-                    raise TextToSpeechError(f"Falha no Piper: {exc}") from exc
-
-        if not self.piper_executable:
-            raise TextToSpeechError("Piper não instalado ou não encontrado no PATH")
-
-        return await self._synthesize_with_cli(text, model_path)
-
-    def _synthesize_with_library(self, text: str, model_path: Path) -> Path:
-        if PiperVoice is None:
-            raise TextToSpeechError("Biblioteca Piper indisponivel")
-
-        if self._voice is None:
-            self._voice = PiperVoice.load(model_path)
-
-        temp_dir = Path(tempfile.mkdtemp(prefix="alpha-tts-"))
-        temp_dir.mkdir(parents=True, exist_ok=True)
         output_path = temp_dir / "speech.wav"
-        try:
-            with wave.open(str(output_path), "wb") as wav_file:
-                self._voice.synthesize_wav(text, wav_file)
-        except Exception as exc:  # pragma: no cover
-            raise TextToSpeechError(f"Falha no Piper: {exc}") from exc
-
-        if not output_path.exists():
-            raise TextToSpeechError("Piper não gerou áudio")
-        return output_path
-
-    async def _synthesize_with_cli(self, text: str, model_path: Path) -> Path:
-        command = [
-            self.piper_executable,
-            "--model",
-            str(model_path),
-            "--output_file",
-            "/tmp/alpha-tts.wav",
-        ]
-
-        temp_dir = Path(tempfile.mkdtemp(prefix="alpha-tts-"))
-        output_path = temp_dir / "speech.wav"
-        command[-1] = str(output_path)
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            generator = self._pipeline(
+                text,
+                voice=self.voice,
             )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=f"{text}\n".encode()),
-                timeout=30,
+
+            audio_chunks: list[np.ndarray] = []
+
+            for _, _, audio in generator:
+                if audio is None:
+                    continue
+
+                audio_array = np.asarray(audio)
+
+                if audio_array.size == 0:
+                    continue
+
+                audio_chunks.append(audio_array)
+
+            if not audio_chunks:
+                raise TextToSpeechError(
+                    "Kokoro não gerou nenhum áudio."
+                )
+
+            full_audio = np.concatenate(
+                audio_chunks
             )
-        except FileNotFoundError as exc:
-            raise TextToSpeechError("Piper não instalado") from exc
-        except TimeoutError as exc:
-            if "process" in locals():
-                process.kill()
-                await process.wait()
-            raise TextToSpeechError("Piper demorou muito para responder") from exc
-        except Exception as exc:  # pragma: no cover
-            raise TextToSpeechError(f"Falha no Piper: {exc}") from exc
 
-        if process.returncode != 0:
-            output = (stderr or stdout or b"").decode("utf-8", errors="replace").strip()
-            message = output or "código de saída " + str(process.returncode)
-            raise TextToSpeechError(f"Falha no Piper: {message}")
+            sf.write(
+                str(output_path),
+                full_audio,
+                self.sample_rate,
+            )
 
-        if not output_path.exists():
-            raise TextToSpeechError("Piper não gerou áudio")
-        return output_path
+            if not output_path.exists():
+                raise TextToSpeechError(
+                    "Kokoro não criou o arquivo de áudio."
+                )
+
+            if output_path.stat().st_size == 0:
+                raise TextToSpeechError(
+                    "Kokoro criou um arquivo de áudio vazio."
+                )
+
+            return output_path
+
+        except TextToSpeechError:
+            raise
+
+        except Exception as exc:
+            raise TextToSpeechError(
+                f"Erro durante a geração do áudio pelo Kokoro: {exc}"
+            ) from exc
