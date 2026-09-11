@@ -53,6 +53,14 @@ def _resolve_device(device: str | int | None) -> int | None:
     return matched[0]
 
 
+# ---- Optional WebRTC VAD integration ----
+try:
+    import webrtcvad
+    _WEBRTC_VAD_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _WEBRTC_VAD_AVAILABLE = False
+
+
 def _write_wav(path: Path, frames: bytes, sample_rate: int, channels: int = 1) -> None:
     with wave.open(str(path), "wb") as wav_file:
         wav_file.setnchannels(channels)
@@ -143,20 +151,43 @@ def _vad_threshold(noise_floor: float, abs_threshold: float, multiplier: float) 
     return max(noise_floor * multiplier, abs_threshold)
 
 
+def _vad_webrtc(rms_value: float, sample_rate: int, vad: Any) -> bool:
+    """Detect voice activity using WebRTC VAD.
+
+    WebRTC VAD expects amplitude-scaled integer samples in the range
+    [-32768, 32767] and a frame duration of 10, 20 or 30 ms.
+    """
+    frame_duration_ms = 30
+    frame_size = int(sample_rate * frame_duration_ms / 1000)
+    # Clamp to valid WebRTC VAD levels
+    amplitude = max(-32768, min(32767, int(rms_value)))
+    try:
+        return vad.is_speech(
+            bytes([amplitude] * frame_size), sample_rate
+        )
+    except Exception:
+        return False
+
+
 def record_microphone_vad(
     device: str | int | None = None,
     sample_rate: int = SAMPLE_RATE,
-    silence_pad: float = 1.2,
-    min_speech_duration: float = 0.4,
+    pre_roll_duration: float = 0.3,
+    silence_pad: float = 0.8,
+    min_speech_duration: float = 0.3,
     max_wait: float = 60.0,
     abs_threshold: float = 300.0,
     noise_floor_multiplier: float = 3.0,
     frame_duration: float = 0.1,
     speech_confirm_frames: int = 2,
+    throat_clear_margin: float = 0.05,
+    use_webrtc_vad: bool = False,
     on_speech_start: Callable[[], None] | None = None,
     abort_event: threading.Event | None = None,
 ) -> Path | None:
     """Grava até detectar o fim da fala (silêncio prolongado).
+
+    Includes pre-ring buffer to avoid cutting the speech start.
 
     Retorna o caminho do WAV com a fala detectada ou ``None`` quando nada é
     falado dentro de ``max_wait`` segundos.
@@ -164,7 +195,12 @@ def record_microphone_vad(
     ``on_speech_start`` é chamado assim que o início da fala é confirmado
     (útil para interromper uma reprodução em andamento). Quando ``abort_event``
     é fornecido e fica marcado, a gravação é encerrada o quanto antes.
+
+    Args:
+        use_webrtc_vad: Se True, usa WebRTC VAD em vez do thresholds RMS.
+            Requer que o pacote ``webrtc-vad`` esteja instalado.
     """
+
     try:
         import sounddevice
     except Exception as exc:  # pragma: no cover
@@ -179,6 +215,19 @@ def record_microphone_vad(
     blocksize = max(1, int(sample_rate * frame_duration))
     frames_queue: Any = queue.Queue()
 
+    # Pre-ring buffer to capture the beginning of speech and avoid cutting it.
+    # Holds approximately pre_roll_duration seconds of audio before speech is detected.
+    pre_roll_frames = max(1, int(pre_roll_duration / frame_duration))
+    pre_roll_buffer: list[np.ndarray] = []
+
+    # Initialize WebRTC VAD if requested
+    webrtc_vad = None
+    if use_webrtc_vad and _WEBRTC_VAD_AVAILABLE:
+        try:
+            webrtc_vad = webrtcvad.Vad(3)  # aggression mode 3 (most aggressive)
+        except Exception:
+            use_webrtc_vad = False
+
     def callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
         sample = indata.flatten()
         rms = float(math.sqrt(float(np.mean(np.square(sample.astype(np.float32))))))
@@ -186,6 +235,7 @@ def record_microphone_vad(
 
     noise_samples: list[float] = []
     speech_chunks: list[np.ndarray] = []
+    ring_buffer_full = False
 
     stream = sounddevice.InputStream(
         samplerate=sample_rate,
@@ -213,28 +263,42 @@ def record_microphone_vad(
                     break
                 continue
 
-            if len(noise_samples) < 8:
-                noise_samples.append(rms)
-                continue
+            # Feed pre-ring buffer regardless of speech state
+            if len(pre_roll_buffer) < pre_roll_frames:
+                pre_roll_buffer.append(sample.copy())
+            elif not ring_buffer_full:
+                # Shift buffer and add new sample (circular behavior)
+                pre_roll_buffer.pop(0)
+                pre_roll_buffer.append(sample.copy())
+                ring_buffer_full = True
 
-            if len(noise_samples) == 8:
-                noise_floor = float(np.percentile(np.asarray(noise_samples), 10))
-                threshold = _vad_threshold(noise_floor, abs_threshold, noise_floor_multiplier)
-
-            if not speech_started:
-                confirming_frames = confirming_frames + 1 if rms >= threshold else 0
-                if confirming_frames >= speech_confirmed:
-                    speech_started = True
-                    silent_frames = 0
-                    if on_speech_start is not None:
-                        on_speech_start()
+            if use_webrtc_vad and webrtc_vad is not None:
+                is_speech = _vad_webrtc(rms, sample_rate, webrtc_vad)
             else:
-                if rms >= threshold:
-                    silent_frames = 0
+                if len(noise_samples) < 8:
+                    noise_samples.append(rms)
+                    continue
+
+                if len(noise_samples) == 8:
+                    noise_floor = float(np.percentile(np.asarray(noise_samples), 10))
+                    threshold = _vad_threshold(noise_floor, abs_threshold, noise_floor_multiplier)
+
+                if not speech_started:
+                    confirming_frames = confirming_frames + 1 if rms >= threshold else 0
+                    if confirming_frames >= speech_confirmed:
+                        speech_started = True
+                        silent_frames = 0
+                        # Emit pre-roll captured audio as the beginning of speech
+                        if on_speech_start is not None:
+                            on_speech_start()
                 else:
-                    silent_frames += 1
-                    if silent_frames >= silence_frames_needed:
-                        break
+                    if rms >= threshold:
+                        silent_frames = 0
+                    else:
+                        silent_frames += 1
+                        # End of speech detected
+                        if silent_frames >= silence_frames_needed:
+                            break
 
             if speech_started:
                 speech_chunks.append(sample)
@@ -242,11 +306,17 @@ def record_microphone_vad(
             if time.monotonic() >= deadline:
                 break
 
-    speech_frames = len(speech_chunks)
+    # If speech was detected, prepend the pre-ring buffer to preserve the speech start
+    if speech_started and pre_roll_buffer:
+        all_chunks = pre_roll_buffer + speech_chunks
+    else:
+        all_chunks = speech_chunks
+
+    speech_frames = len(all_chunks)
     if speech_frames < speech_frames_min:
         return None
 
-    frames = b"".join(chunk.astype(np.int16).tobytes() for chunk in speech_chunks)
+    frames = b"".join(chunk.astype(np.int16).tobytes() for chunk in all_chunks)
     return _save_wav(frames, sample_rate)
 
 

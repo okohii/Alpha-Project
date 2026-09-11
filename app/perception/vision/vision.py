@@ -1,9 +1,9 @@
 """Provedor de visão local (Ollama) para descrever capturas de tela em texto."""
 from __future__ import annotations
-from dataclasses import dataclass, field
 
 import base64
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 

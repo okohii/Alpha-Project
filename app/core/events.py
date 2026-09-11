@@ -45,6 +45,11 @@ class EventType(StrEnum):
     # voz
     voice_started = "voice_started"
     voice_finished = "voice_finished"
+    # pipeline de voz
+    assistant_listening = "assistant.listening"
+    assistant_transcribing = "assistant.transcribing"
+    assistant_thinking = "assistant.thinking"
+    assistant_speaking = "assistant.speaking"
 
 
 PROGRESS_EVENTS = (

@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import tempfile
-import wave
-from abc import ABC, abstractmethod
 from pathlib import Path
+from abc import ABC, abstractmethod
+from typing import Callable, Optional
+
+from kokoro import KPipeline
+import soundfile as sf
 
 from app.core.config import get_settings
 
 try:
-    from piper import PiperVoice
+    from kokoro_ml import KokoroVoice
 except Exception:  # pragma: no cover
-    PiperVoice = None
+    KokoroVoice = None
 
 
 class TextToSpeechError(RuntimeError):
@@ -24,6 +26,71 @@ class TextToSpeech(ABC):
     @abstractmethod
     async def synthesize(self, text: str) -> Path:
         raise NotImplementedError
+
+
+class KokoroTTS(TextToSpeech):
+    def __init__(self) -> None:
+        self.settings = get_settings()
+        self._voice: Optional[object] = None
+        self._pipeline = KPipeline(lang_code='a')
+
+    async def synthesize(self, text: str) -> Path:
+        """Synthesize speech from text using Kokoro.
+
+        Returns:
+            Path to a WAV file containing the synthesized speech.
+        """
+        try:
+            temp_dir = Path(tempfile.mkdtemp(prefix="alpha-tts-"))
+            output_path = temp_dir / "speech.wav"
+
+            generator = self._pipeline(text, voice='af_heart')
+            audio_chunks = []
+            for i, (gs, ps, audio) in enumerate(generator):
+                audio_chunks.append(audio)
+
+            if not audio_chunks:
+                raise TextToSpeechError("Nenhum audio gerado")
+
+            # Concatenate all audio chunks
+            import numpy as np
+            full_audio = np.concatenate(audio_chunks)
+
+            # Write to WAV file
+            sf.write(str(output_path), full_audio, 24000)
+
+        except Exception as exc:
+            raise TextToSpeechError(f"Falha na sintetizacao Kokoro: {exc}") from exc
+
+        if not output_path.exists():
+            raise TextToSpeechError("Kokoro nao gerou audio")
+        return output_path
+
+    def stream_synthesize(self, text: str, on_chunk: Callable[[bytes], None]) -> None:
+        """Stream synthesis chunks as they are generated.
+
+        Args:
+            text: The text to synthesize.
+            on_chunk: Callback receiving audio bytes chunks.
+        """
+        if self._voice is None and KokoroVoice is not None:
+            model_path = (
+                self.settings.tts_voice
+                or os.environ.get("KOKORO_MODEL")
+                or "hexgrad/Kokoro-82M"
+            )
+            try:
+                self._voice = KokoroVoice(model_path)
+            except Exception:
+                return
+
+        if self._voice is not None:
+            try:
+                chunks = self._voice.stream_synthesize(text)
+                for chunk in chunks:
+                    on_chunk(chunk)
+            except Exception:
+                pass
 
 
 class PiperTTS(TextToSpeech):
@@ -67,7 +134,7 @@ class PiperTTS(TextToSpeech):
 
     def _synthesize_with_library(self, text: str, model_path: Path) -> Path:
         if PiperVoice is None:
-            raise TextToSpeechError("Biblioteca Piper indisponível")
+            raise TextToSpeechError("Biblioteca Piper indisponivel")
 
         if self._voice is None:
             self._voice = PiperVoice.load(model_path)

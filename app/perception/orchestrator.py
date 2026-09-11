@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Tuple
+from typing import Any
 
-from app.evidence import Evidence, EvidenceKind
+from app.evidence import Evidence, EvidenceKind, VerificationResult
 from app.perception.accessibility import AccessibilityPerceptor, AccessibilityTree
 from app.perception.dom import DOMPerceptor, DOMTree
-from app.perception.ocr import OCRPerceptor, OCREvidence
+from app.perception.ocr import OCRPerceptor
 from app.perception.vision import VisionPerceptor
-from app.evidence import VerificationResult
 
 
 @dataclass(slots=True)

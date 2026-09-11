@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from app.evidence import Evidence, EvidenceKind, VerificationResult
 from app.perception.vision.verify import OllamaVisionVerifier, get_vision_verifier

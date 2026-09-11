@@ -58,11 +58,7 @@ class Settings(BaseSettings):
     stt_language: str = "pt"
     stt_device: str = "auto"
     stt_compute_type: str = "auto"
-    stt_initial_prompt: str = (
-        "navegador, abrir o navegador, abrir o chrome, Prime Video, YouTube, "
-        "abrir o aplicativo, dar play, pausar, fechar, digitar, escrever, "
-        "clicar, buscar, pesquisar, arquivo, pasta, downloads, documentos."
-    )
+    stt_initial_prompt: str = ""
 
     wake_word_enabled: bool = False
     wake_words: str = "alpha"

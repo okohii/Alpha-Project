@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Optional
-
-from app.core.events import EventType
-from app.llm.base import ExecutionEvidence
+from typing import Any
 
 
 class AccessibilityState(StrEnum):
@@ -37,7 +34,7 @@ class AccessibilityNode:
     state: dict[str, Any] = field(default_factory=dict)
     attributes: dict[str, str] = field(default_factory=dict)
     position: dict[str, int] | None = None  # {left, top, width, height}
-    children: list["AccessibilityNode"] = field(default_factory=list)
+    children: list[AccessibilityNode] = field(default_factory=list)
     accessible: bool = True
 
 
