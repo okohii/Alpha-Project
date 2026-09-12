@@ -7,7 +7,7 @@ from typing import Any
 
 from app.agent.agent import AgentCore
 from app.core.events import EventType
-from app.llm.base import ExecutionEvidence, LLMMessage, LLMProvider, LLMResponse
+from app.llm.base import ExecutionEvidence, LLMMessage, LLMProvider, LLMResponse, ToolCall
 
 _TOOL_INTENT_RE = re.compile(
     r"(?:vou|vamos|irei|iremos|usarei|utilizarei)\s+[^.\n]{0,180}",
@@ -25,6 +25,13 @@ _WEATHER_CLAIM_RE = re.compile(
 _WEATHER_EVIDENCE_TOOLS = frozenset(
     {"web_search", "browser_text", "browser_html", "browser_js", "read_ui", "verify_screen"}
 )
+
+# Ferramentas cujo sucesso já representa o efeito final que o usuário pediu.
+# Elas não precisam de uma segunda inferência do LLM para transformar o
+# resultado em uma frase curta. Não incluímos browser/computer/messaging:
+# nesses casos o ALPHA ainda precisa preservar a etapa de interpretação/
+# verificação para não transformar "executado" em "verificado".
+_FAST_POST_TOOL_TOOLS = frozenset({"memory_save", "file_write"})
 
 
 class SerializedAgentCore(AgentCore):
@@ -138,12 +145,142 @@ class SerializedAgentCore(AgentCore):
             return "Não posso considerar uma ferramenta executada sem uma chamada nativa real."
         return content
 
+    @staticmethod
+    def _fast_post_tool_response(execution: ExecutionEvidence) -> str | None:
+        """Cria resposta final sem LLM quando a tool já encerra o objetivo.
+
+        O fast path só aceita sucesso real e ferramentas em uma allowlist
+        conservadora. Resultado de navegador/computador/mensageria nunca entra
+        aqui, evitando alegações de verificação sem uma etapa explícita.
+        """
+        tool_name = execution.tool.split("(", 1)[0]
+        if not execution.success or tool_name not in _FAST_POST_TOOL_TOOLS:
+            return None
+        if not isinstance(execution.result, dict):
+            return None
+
+        if tool_name == "memory_save":
+            return "Pronto, salvei isso na memória."
+        if tool_name == "file_write":
+            return "Pronto, o arquivo foi salvo."
+        return None
+
+    async def _run_agent_loop(
+        self,
+        provider: LLMProvider,
+        messages: list[LLMMessage],
+        permissions: set[Any],
+        conversation_id: str | None = None,
+        stream_tokens: bool = False,
+        task: str = "",
+        context: Any | None = None,
+        expose_tools: bool = True,
+    ) -> tuple[LLMResponse, list[LLMMessage]]:
+        """Executa o loop normal, com fast path determinístico pós-tool."""
+        allowed_names = self._initial_tool_names(task, permissions) if expose_tools else set()
+        evidence: list[ExecutionEvidence] = []
+        new_messages: list[LLMMessage] = []
+        executed_signatures: set[str] = set()
+
+        last_response = await self._provider_turn(
+            provider, messages, self._schemas_for(allowed_names, permissions), stream_tokens
+        )
+        iterations = 0
+        while last_response.tool_calls and iterations < self.settings.agent_max_tool_iterations:
+            self._raise_if_cancelled()
+            assistant_turn = LLMMessage(
+                role="assistant",
+                content=AgentCore._scrub_internal_json(last_response.content or ""),
+                tool_calls=last_response.tool_calls,
+            )
+            messages.append(assistant_turn)
+            new_messages.append(assistant_turn)
+
+            tool_messages: list[LLMMessage] = []
+            iteration_executions: list[ExecutionEvidence] = []
+            for tool_call in last_response.tool_calls:
+                signature = self._call_signature(tool_call)
+                if signature in executed_signatures:
+                    tool_messages.append(self._repeated_call_message(tool_call))
+                    continue
+                executed_signatures.add(signature)
+                tool_msg, execution = await self._execute_tool(
+                    tool_call, permissions, conversation_id, allowed_names
+                )
+                tool_messages.append(tool_msg)
+                if execution is not None:
+                    evidence.append(execution)
+                    iteration_executions.append(execution)
+            messages.extend(tool_messages)
+            new_messages.extend(tool_messages)
+
+            # Fast Post-Tool Response: uma única tool determinística bem-sucedida
+            # já produziu a evidência final. Evita o segundo round do LLM.
+            if len(last_response.tool_calls) == 1 and len(iteration_executions) == 1:
+                fast_content = self._fast_post_tool_response(iteration_executions[0])
+                if fast_content is not None:
+                    final = LLMMessage(role="assistant", content=fast_content)
+                    messages.append(final)
+                    new_messages.append(final)
+                    self._evidence = [item.to_dict() for item in evidence]
+                    if context is not None:
+                        context.evidence = list(evidence)
+                        context.exposed_tools = set(allowed_names)
+                        context.response_candidate = fast_content
+                    self._emit(
+                        EventType.agent_progress,
+                        {
+                            "kind": "fast_post_tool_response",
+                            "tool": iteration_executions[0].tool,
+                        },
+                    )
+                    self._emit(
+                        EventType.assistant_message,
+                        payload={"preview": fast_content[:120], "content": fast_content},
+                    )
+                    return LLMResponse(content=fast_content, raw=last_response.raw), new_messages
+
+            called_names = [tool_call.name for tool_call in last_response.tool_calls]
+            allowed_names = self._expand_tools(allowed_names, called_names)
+
+            turn_input = self._with_execution_context(task, messages, evidence)
+            last_response = await self._provider_turn(
+                provider,
+                turn_input,
+                self._schemas_for(allowed_names, permissions),
+                stream_tokens,
+            )
+            iterations += 1
+
+        content = last_response.content or ""
+        content = AgentCore._scrub_internal_json(content)
+        if content and content != content.strip():
+            content = content.strip()
+        content = self._apply_honesty_gate(content, evidence)
+        if not content and evidence and not any(item.success for item in evidence):
+            content = (
+                "Não consegui concluir com evidência: as ferramentas necessárias falharam "
+                "ou não retornaram um resultado de sucesso. Verifique os erros relatados "
+                "e tente novamente."
+            )
+        final = LLMMessage(role="assistant", content=content)
+        messages.append(final)
+        new_messages.append(final)
+        self._evidence = [item.to_dict() for item in evidence]
+        if context is not None:
+            context.evidence = list(evidence)
+            context.exposed_tools = set(allowed_names)
+            context.response_candidate = content
+        self._emit(
+            EventType.assistant_message,
+            payload={"preview": content[:120], "content": content},
+        )
+        return LLMResponse(content=content, raw=last_response.raw), new_messages
+
     def _expand_tools(self, allowed: set[str], called: list[str]) -> set[str]:
         return set(allowed)
 
     async def _load_history(self, conversation_id: str, limit: int) -> list[LLMMessage]:
-        # O AgentCore antigo chama com 30; o orçamento configurado deve ser a
-        # autoridade final para manter o contexto curto e reduzir latência.
         return await super()._load_history(
             conversation_id,
             limit=max(1, min(limit, self.settings.agent_history_limit)),
@@ -154,11 +291,12 @@ class SerializedAgentCore(AgentCore):
         content: str,
         evidence: list[ExecutionEvidence],
     ) -> str:
-        # Um open_url/browser_open bem-sucedido prova apenas abertura da URL.
-        # Não prova que uma previsão/clima foi lida ou verificada.
         if content and _WEATHER_CLAIM_RE.search(content):
             successful = [item for item in evidence if item.success]
-            if successful and not any(item.tool.split("(", 1)[0] in _WEATHER_EVIDENCE_TOOLS for item in successful):
+            if successful and not any(
+                item.tool.split("(", 1)[0] in _WEATHER_EVIDENCE_TOOLS
+                for item in successful
+            ):
                 self._emit(EventType.honesty_gate, {
                     "claim": "weather_result",
                     "executed": True,
