@@ -30,37 +30,16 @@ class MemoryItem:
     expiration: datetime | None
 
     def model_dump(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "content": self.content,
-            "memory_type": self.memory_type,
-            "type": self.memory_type,
-            "source": self.source,
-            "importance": self.importance,
-            "confidence": self.confidence,
-            "embedding": self.embedding,
-            "metadata": self.metadata,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-            "expiration": self.expiration.isoformat() if self.expiration else None,
-        }
+        return {"id": self.id, "content": self.content, "memory_type": self.memory_type, "type": self.memory_type, "source": self.source, "importance": self.importance, "confidence": self.confidence, "embedding": self.embedding, "metadata": self.metadata, "created_at": self.created_at.isoformat(), "updated_at": self.updated_at.isoformat(), "expiration": self.expiration.isoformat() if self.expiration else None}
 
 
 class MemoryService:
-    """Orquestra memória sem acoplar Agent ao backend.
-
-    Working memory é transitória e fica em RAM. Ela é limitada por contexto e
-    pelo número máximo de contextos ativos; memória persistente passa pelo
-    repositório (SQLite hoje) e só é carregada sob demanda.
-    """
+    """Orquestra Working, Episodic, Semantic e Preference Memory."""
 
     def __init__(self, repository: MemoryRepositoryProtocol, embedding_provider: EmbeddingProvider) -> None:
         self.repository = repository
         self.embedding_provider = embedding_provider
         self.settings = get_settings()
-        # OrderedDict permite LRU de contextos sem deixar conversas antigas
-        # ocuparem RAM indefinidamente. Os itens de cada contexto também são
-        # limitados por memory_working_max_items.
         self._working: OrderedDict[str, list[MemoryItem]] = OrderedDict()
 
     def score_importance(self, content: str) -> float:
@@ -68,8 +47,7 @@ class MemoryService:
         if not text:
             return 0.0
         score = 0.10
-        markers = ("projeto", "importante", "lembre", "memorize", "regra", "prefer", "sempre", "nunca")
-        if any(marker in text for marker in markers):
+        if any(marker in text for marker in ("projeto", "importante", "lembre", "memorize", "regra", "prefer", "sempre", "nunca")):
             score += 0.50
         if len(text) > 120:
             score += 0.15
@@ -79,114 +57,72 @@ class MemoryService:
 
     def _resolve_type(self, memory_type: str | None, content: str) -> str:
         raw = (memory_type or "").strip().lower()
-        aliases = {
-            "episodic": MemoryType.EPISODIC.value,
-            "episode": MemoryType.EPISODIC.value,
-            "semantic": MemoryType.SEMANTIC.value,
-            "preference": MemoryType.PREFERENCE.value,
-            "preferencia": MemoryType.PREFERENCE.value,
-            "working": MemoryType.WORKING.value,
-            "perfil": MemoryType.SEMANTIC.value,
-            "procedimento": MemoryType.SEMANTIC.value,
-        }
+        aliases = {"episodic": "episodic", "episode": "episodic", "semantic": "semantic", "preference": "preference", "preferencia": "preference", "working": "working", "perfil": "semantic", "procedimento": "semantic"}
         if raw in aliases:
             return aliases[raw]
-        return MemoryType.PREFERENCE.value if detect_kind(content) == "preferencia" else MemoryType.SEMANTIC.value
+        return "preference" if detect_kind(content) == "preferencia" else "semantic"
 
     def _touch_working_context(self, context_id: str) -> list[MemoryItem]:
-        bucket = self._working.pop(context_id, None)
-        if bucket is None:
-            bucket = []
+        bucket = self._working.pop(context_id, None) or []
         self._working[context_id] = bucket
         max_contexts = max(1, self.settings.memory_working_max_contexts)
         while len(self._working) > max_contexts:
             self._working.popitem(last=False)
         return bucket
 
-    async def save_memory(
-        self,
-        content: str,
-        memory_type: str = "semantic",
-        source: str = "chat",
-        importance: float | None = None,
-        confidence: float = 1.0,
-        metadata: dict[str, Any] | None = None,
-        expiration: datetime | None = None,
-        persist_if_relevant: bool = True,
-        context_id: str | None = None,
-    ) -> MemoryItem | None:
+    async def save_memory(self, content: str, memory_type: str = "semantic", source: str = "chat", importance: float | None = None, confidence: float = 1.0, metadata: dict[str, Any] | None = None, expiration: datetime | None = None, persist_if_relevant: bool = True, context_id: str | None = None) -> MemoryItem | None:
         content = (content or "").strip()
         if not content:
             return None
         resolved_type = self._resolve_type(memory_type, content)
         resolved_importance = max(0.0, min(1.0, importance if importance is not None else self.score_importance(content)))
         confidence = max(0.0, min(1.0, confidence))
-
-        if resolved_type == MemoryType.WORKING.value:
+        if resolved_type == "working":
             context_key = context_id or "default"
             item = self._make_item(content, resolved_type, source, resolved_importance, confidence, metadata, expiration)
             bucket = self._touch_working_context(context_key)
             bucket.append(item)
             self._working[context_key] = bucket[-max(1, self.settings.memory_working_max_items):]
             return item
-
         if persist_if_relevant and resolved_importance < self.settings.memory_min_importance:
             return None
         if expiration is not None and is_expired(expiration):
             return None
-
         metadata = dict(metadata or {})
-        if resolved_type == MemoryType.PREFERENCE.value:
+        if resolved_type == "preference":
             metadata.setdefault("preference_key", preference_key(content, metadata))
             resolved_importance = 1.0
             key = metadata["preference_key"]
-            existing = await self.repository.list(limit=50, memory_type=MemoryType.PREFERENCE.value)
-            for old in existing:
+            for old in await self.repository.list(limit=50, memory_type="preference"):
                 if (old.metadata_ or {}).get("preference_key") == key:
                     await self.repository.delete(old.id)
-
         embedding = await self.embedding_provider.embed(content)
         now = utcnow()
-        row = MemoryModel(
-            id=str(uuid4()),
-            content=content,
-            memory_type=resolved_type,
-            source=source,
-            importance=resolved_importance,
-            confidence=confidence,
-            embedding=embedding,
-            metadata_=metadata,
-            created_at=now,
-            updated_at=now,
-            expiration=expiration,
-        )
-        saved = await self.repository.save(row)
-        return self._to_item(saved)
+        row = MemoryModel(id=str(uuid4()), content=content, memory_type=resolved_type, source=source, importance=resolved_importance, confidence=confidence, embedding=embedding, metadata_=metadata, created_at=now, updated_at=now, expiration=expiration)
+        return self._to_item(await self.repository.save(row))
 
     async def save_working(self, context_id: str, content: str, *, source: str = "runtime", importance: float = 1.0, confidence: float = 1.0, metadata: dict[str, Any] | None = None, expiration: datetime | None = None) -> MemoryItem | None:
-        return await self.save_memory(content, MemoryType.WORKING.value, source, importance, confidence, metadata, expiration, persist_if_relevant=False, context_id=context_id)
+        return await self.save_memory(content, "working", source, importance, confidence, metadata, expiration, False, context_id)
 
     def get_working(self, context_id: str) -> list[MemoryItem]:
-        now = utcnow()
-        bucket = self._touch_working_context(context_id)
-        bucket[:] = [item for item in bucket if not is_expired(item.expiration, now=now)]
+        bucket = self._working.get(context_id)
+        if bucket is None:
+            return []
+        bucket[:] = [item for item in bucket if not is_expired(item.expiration)]
         if not bucket:
             self._working.pop(context_id, None)
+        else:
+            self._working.move_to_end(context_id)
         return list(bucket)
 
     def clear_working(self, context_id: str) -> None:
-        """Libera imediatamente as referências do contexto da RAM."""
         self._working.pop(context_id, None)
 
     def clear_all_working(self) -> None:
-        """Libera todos os contextos de Working Memory."""
         self._working.clear()
 
     def working_stats(self) -> dict[str, int]:
-        return {
-            "contexts": len(self._working),
-            "items": sum(len(items) for items in self._working.values()),
-        }
+        return {"contexts": len(self._working), "items": sum(len(items) for items in self._working.values())}
 
     async def save_episode(self, user_message: str, response: str, tool_names: list[str] | None = None, *, confidence: float = 1.0, metadata: dict[str, Any] | None = None) -> MemoryItem | None:
         if detect_kind(user_message or "") == "preferencia":
@@ -196,24 +132,23 @@ class MemoryService:
         if importance < self.settings.memory_min_importance:
             return None
         content = build_episode_memory(user_message or "", response or "", tools)
-        return await self.save_memory(content, MemoryType.EPISODIC.value, "agent", importance, confidence, {**(metadata or {}), "episode": True, "tools": tools})
+        return await self.save_memory(content, "episodic", "agent", importance, confidence, {**(metadata or {}), "episode": True, "tools": tools})
 
     async def save_semantic(self, content: str, *, source: str = "semantic", importance: float | None = None, confidence: float = 1.0, metadata: dict[str, Any] | None = None) -> MemoryItem | None:
-        return await self.save_memory(content, MemoryType.SEMANTIC.value, source, importance, confidence, metadata)
+        return await self.save_memory(content, "semantic", source, importance, confidence, metadata)
 
     async def save_preference(self, content: str, *, source: str = "explicit", confidence: float = 1.0, metadata: dict[str, Any] | None = None) -> MemoryItem | None:
-        return await self.save_memory(content, MemoryType.PREFERENCE.value, source, 1.0, confidence, metadata)
+        return await self.save_memory(content, "preference", source, 1.0, confidence, metadata)
 
     async def save_profile(self, content: str) -> MemoryItem | None:
         return await self.save_semantic(content, source="profile", importance=1.0, confidence=1.0, metadata={"profile": True})
 
     async def list_memories(self, limit: int = 100, memory_type: str | None = None) -> list[MemoryItem]:
-        memories = await self.repository.list(limit=limit, memory_type=memory_type)
-        return [self._to_item(memory) for memory in memories if not is_expired(memory.expiration)]
+        return [self._to_item(m) for m in await self.repository.list(limit=limit, memory_type=memory_type) if not is_expired(m.expiration)]
 
     async def load_profile(self, limit: int = 50) -> list[MemoryItem]:
-        semantic = await self.repository.list(limit=limit, memory_type=MemoryType.SEMANTIC.value)
-        preferences = await self.repository.list(limit=limit, memory_type=MemoryType.PREFERENCE.value)
+        semantic = await self.repository.list(limit=limit, memory_type="semantic")
+        preferences = await self.repository.list(limit=limit, memory_type="preference")
         items = [self._to_item(m) for m in [*semantic, *preferences] if not is_expired(m.expiration)]
         items.sort(key=lambda item: (item.importance, item.updated_at), reverse=True)
         return items[:limit]
