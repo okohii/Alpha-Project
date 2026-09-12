@@ -36,6 +36,30 @@ _STATE_LABELS = {
     "error": "Erro",
 }
 
+_STATE_ICONS = {
+    "idle": "✦",
+    "listening": "◉",
+    "thinking": "◌",
+    "planning": "⌁",
+    "executing": "⚙",
+    "verifying": "✓",
+    "speaking": "◖",
+    "success": "✓",
+    "error": "!",
+}
+
+_STATE_COLORS = {
+    "idle": "#66dfff",
+    "listening": "#62a8ff",
+    "thinking": "#9b7cff",
+    "planning": "#c995ff",
+    "executing": "#ffb35c",
+    "verifying": "#ff6bd6",
+    "speaking": "#63f2c2",
+    "success": "#72ffad",
+    "error": "#ff5d86",
+}
+
 
 class _WebSocketThread(threading.Thread):
     def __init__(self, url: str, incoming: Queue[dict[str, Any]]) -> None:
@@ -123,13 +147,10 @@ class NativeAlphaWindow(QWidget):
         )
 
         if mode == "avatar":
-            # Avatar: a janela inteira é transparente. Não existe painel, borda,
-            # header ou retângulo de fundo; apenas o Astral Core é desenhado.
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
             self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
             self.setStyleSheet("QWidget { background: transparent; border: none; }")
         else:
-            # Chat: janela deliberadamente opaca, sem o efeito de vidro/transparência.
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
             self.setStyleSheet("QWidget { background: #080a18; color: #e8f7ff; }")
 
@@ -159,12 +180,29 @@ class NativeAlphaWindow(QWidget):
         layout.setSpacing(0)
         self.core = AstralCore(root)
         self.core.setMinimumSize(240, 240)
+        self.core.setStyleSheet("background: transparent; border: none;")
         layout.addWidget(self.core, 1)
 
-        # Avatar visual-only: estado e logs continuam no backend, mas não criam
-        # elementos retangulares sobre a janela transparente.
+        # HUD do avatar: somente texto/ícone, sem painel, borda ou fundo.
+        self.status_overlay = QLabel(root)
+        self.status_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_overlay.setStyleSheet(
+            "QLabel { background: transparent; border: none; font-size: 12px; "
+            "font-weight: 600; padding: 2px; }"
+        )
+        self.status_overlay.setGeometry(12, max(0, self.height() - 54), self.width() - 24, 24)
+        self.status_overlay.raise_()
+
         self.activity = QLabel(root)
-        self.activity.hide()
+        self.activity.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.activity.setWordWrap(True)
+        self.activity.setStyleSheet(
+            "QLabel { background: transparent; border: none; color: #e8f7ff; "
+            "font-size: 10px; padding: 2px; }"
+        )
+        self.activity.setGeometry(16, max(0, self.height() - 34), self.width() - 32, 30)
+        self.activity.raise_()
+        self._update_avatar_hud("idle", "Pronto")
         self.log_area = None
 
     def _build_chat_ui(self) -> None:
@@ -181,7 +219,7 @@ class NativeAlphaWindow(QWidget):
         title = QLabel("ALPHA  ·  ASTRAL CORE")
         title.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
         self.state = QLabel("● Repouso")
-        self.state.setStyleSheet("color: #79dcff; font-size: 11px;")
+        self.state.setStyleSheet("color: #66dfff; font-size: 11px;")
         close = QPushButton("×")
         close.setFixedSize(30, 28)
         close.clicked.connect(self.close)
@@ -193,10 +231,13 @@ class NativeAlphaWindow(QWidget):
 
         self.core = AstralCore(root)
         self.core.setMinimumSize(240, 240)
+        # O QQuickWidget usa uma superfície própria; no chat ela precisa ser
+        # exatamente da mesma cor da janela para não criar um retângulo preto.
+        self.core.setStyleSheet("background: #080a18; border: none;")
         outer.addWidget(self.core, 1, Qt.AlignmentFlag.AlignCenter)
 
         self.activity = QLabel("Pronto")
-        self.activity.setStyleSheet("color: #c9e7f5; font-size: 11px;")
+        self.activity.setStyleSheet("color: #c9e7f5; font-size: 11px; background: #080a18;")
         outer.addWidget(self.activity)
 
         self.log_area = QScrollArea()
@@ -227,6 +268,9 @@ class NativeAlphaWindow(QWidget):
     def resizeEvent(self, event: Any) -> None:  # noqa: N802
         if hasattr(self, "root"):
             self.root.setGeometry(self.rect())
+        if self.mode == "avatar" and hasattr(self, "status_overlay"):
+            self.status_overlay.setGeometry(12, max(0, self.height() - 54), self.width() - 24, 24)
+            self.activity.setGeometry(16, max(0, self.height() - 34), self.width() - 32, 30)
         super().resizeEvent(event)
 
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802
@@ -269,18 +313,46 @@ class NativeAlphaWindow(QWidget):
         QTimer.singleShot(0, lambda: self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum()))
 
     def _set_state(self, state: str) -> None:
+        state = state if state in _STATE_LABELS else "idle"
         self.core.set_state(state)
         if self.mode == "chat":
-            self.state.setText(f"● {_STATE_LABELS.get(state, state.title())}")
+            color = _STATE_COLORS[state]
+            self.state.setStyleSheet(f"color: {color}; font-size: 11px;")
+            self.state.setText(f"{_STATE_ICONS[state]} {_STATE_LABELS[state]}")
+        else:
+            self._update_avatar_hud(state, self.activity.text() or _STATE_LABELS[state])
+
+    def _update_avatar_hud(self, state: str, activity: str) -> None:
+        if self.mode != "avatar":
+            return
+        state = state if state in _STATE_LABELS else "idle"
+        color = _STATE_COLORS[state]
+        self.status_overlay.setText(f"{_STATE_ICONS[state]}  {_STATE_LABELS[state]}")
+        self.status_overlay.setStyleSheet(
+            f"QLabel {{ background: transparent; border: none; color: {color}; "
+            "font-size: 12px; font-weight: 600; padding: 2px; }}"
+        )
+        self.activity.setText(activity)
+        self.activity.setStyleSheet(
+            "QLabel { background: transparent; border: none; color: #e8f7ff; "
+            "font-size: 10px; padding: 2px; }"
+        )
 
     def _execution(self, message: dict[str, Any]) -> None:
         target = message.get("target") or "sistema"
         label = message.get("label") or message.get("event") or "execução"
+        detail = str(message.get("detail") or "").strip()
         success = message.get("success")
         suffix = " ✓" if success is True else "" if success is None else " ✕"
+        activity = f"{label}: {target}{suffix}"
+        if detail and success is not True:
+            activity = f"{activity} · {detail[:110]}"
         if self.mode == "chat":
-            self.activity.setText(f"{label}: {target}{suffix}")
-            self._append_log("ALPHA", self.activity.text())
+            self.activity.setText(activity)
+            self._append_log("ALPHA", activity)
+        else:
+            state = "error" if success is False else "executing"
+            self._update_avatar_hud(state, activity)
 
     def _drain_events(self) -> None:
         processed = 0
@@ -296,23 +368,35 @@ class NativeAlphaWindow(QWidget):
             elif kind == "execution":
                 self._execution(message)
             elif kind == "caption":
+                author = "Você" if message.get("from") == "user" else "ALPHA"
+                text = str(message.get("text", ""))
+                if not text:
+                    continue
                 if self.mode == "chat":
-                    author = "Você" if message.get("from") == "user" else "ALPHA"
-                    self._append_log(author, str(message.get("text", "")))
+                    self._append_log(author, text)
+                else:
+                    self._update_avatar_hud("speaking" if author == "ALPHA" else "listening", text[:180])
             elif kind == "confirmation":
                 tool = message.get("tool", "ação")
                 args = message.get("arguments", "")
                 if self.mode == "chat":
                     self.activity.setText(f"Confirmação: {tool} {args}".strip())
                     self._append_confirmation(tool, args)
+                else:
+                    self._update_avatar_hud("verifying", f"Confirmação: {tool}")
             elif kind == "done":
                 self.conversation_id = message.get("conversation_id") or self.conversation_id
                 if self.mode == "chat":
                     self._set_state("idle")
+                else:
+                    self._update_avatar_hud("success", "Tarefa concluída")
+                    QTimer.singleShot(1800, lambda: self._set_state("idle"))
             elif kind == "error":
                 self._set_state("error")
                 if self.mode == "chat":
                     self.activity.setText(str(message.get("message", "erro")))
+                else:
+                    self._update_avatar_hud("error", str(message.get("message", "erro"))[:180])
             elif kind == "connected":
                 if self.mode == "chat":
                     self.activity.setText("Conectado ao ALPHA Core")
@@ -321,6 +405,8 @@ class NativeAlphaWindow(QWidget):
             elif kind == "connection_error":
                 if self.mode == "chat":
                     self.activity.setText("Conectando ao ALPHA Core…")
+                else:
+                    self._update_avatar_hud("error", "Conectando ao ALPHA Core…")
 
     def _append_confirmation(self, tool: str, args: str) -> None:
         box = QFrame()
