@@ -5,11 +5,14 @@
   const confirmChip = document.getElementById("confirmChip");
   const confirmText = document.getElementById("confirmText");
   const closeBtn = document.getElementById("closeBtn");
+  const executionPanel = document.getElementById("executionPanel");
+  const executionList = document.getElementById("executionList");
 
   let ws = null;
   let astral = null;
   let idleTimer = null;
   let captionTimer = null;
+  let executionTimer = null;
   let lastState = "idle";
   let pendingConfirm = false;
 
@@ -28,7 +31,6 @@
 
     ws.onopen = () => {
       setState("idle");
-      // Mic já ligado: a sessão de voz começa no backend assim que o WS abre.
       ws.send(JSON.stringify({ action: "start" }));
     };
     ws.onmessage = (ev) => {
@@ -43,6 +45,7 @@
     ws.onclose = () => {
       clearTimeout(idleTimer);
       clearTimeout(captionTimer);
+      clearTimeout(executionTimer);
       pendingConfirm = false;
       confirmChip.hidden = true;
       setTimeout(connect, 1500);
@@ -71,6 +74,10 @@
         showCaption(msg.text, msg.from);
         break;
 
+      case "execution":
+        addExecution(msg);
+        break;
+
       case "ready":
         if (msg.voice === "on" && astral) astral.setAmplitude(0.1);
         break;
@@ -81,8 +88,31 @@
 
       case "error":
         showCaption(msg.message || "erro", "error");
+        addExecution({ label: "erro", target: msg.message || "", success: false });
         break;
     }
+  }
+
+  function addExecution(msg) {
+    executionPanel.hidden = false;
+    const item = document.createElement("div");
+    item.className = "execution-item";
+    const icon = document.createElement("span");
+    icon.className = "execution-icon";
+    icon.textContent = msg.success === false ? "✗" : msg.success === true ? "✓" : "◉";
+    const text = document.createElement("span");
+    text.className = "execution-text";
+    const target = msg.target ? ` ${msg.target}` : "";
+    text.textContent = `${msg.label || msg.event || "ação"}${target}`;
+    item.appendChild(icon);
+    item.appendChild(text);
+    executionList.appendChild(item);
+    while (executionList.children.length > 6) executionList.removeChild(executionList.firstChild);
+    clearTimeout(executionTimer);
+    executionTimer = setTimeout(() => {
+      executionPanel.hidden = true;
+      executionList.innerHTML = "";
+    }, 9000);
   }
 
   function showCaption(text, from) {
@@ -110,15 +140,11 @@
     }
   }
 
-  /* ── janela (pywebview) ─────────────────────────────── */
-
   function toggleSolid() {
     const isSolid = document.body.classList.toggle("solid");
     try {
       localStorage.setItem("alphaAvatarSolid", isSolid ? "1" : "0");
-    } catch (e) {
-      // noop
-    }
+    } catch (e) {}
   }
 
   function restoreSolid() {
@@ -126,9 +152,7 @@
       if (localStorage.getItem("alphaAvatarSolid") === "1") {
         document.body.classList.add("solid");
       }
-    } catch (e) {
-      // noop
-    }
+    } catch (e) {}
   }
 
   function closeWindow() {
@@ -142,8 +166,6 @@
     }
   }
 
-  // Duplo clique: se a transparência real não compõe o desktop, alterna
-  // para fundo sólido escuro (rede de segurança manual).
   document.addEventListener("dblclick", (e) => {
     e.preventDefault();
     toggleSolid();
