@@ -24,9 +24,13 @@ class LLMRoute(StrEnum):
 class LLMRouter:
     """Central routing policy for ALPHA.
 
-    In hybrid mode, deterministic signals select the cloud only when a task is
-    materially more demanding than a short local interaction. No extra LLM
+    In hybrid mode, deterministic signals select the gateway only when a task
+    is materially more demanding than a short local interaction. No extra LLM
     call is made just to classify the task.
+
+    The OpenAI-compatible endpoint is treated as a gateway, not as a vendor
+    model. For 9Router, ``alpha`` is the gateway/combo profile and the router
+    behind it remains responsible for selecting the actual upstream model.
     """
 
     _COMPLEX_PATTERNS = (
@@ -45,16 +49,31 @@ class LLMRouter:
         cloud_provider: LLMProvider | None = None,
     ) -> None:
         self.settings = get_settings()
+        self._logger = logging.getLogger("app.llm.router")
         self.local_provider = local_provider or OllamaProvider()
         if cloud_provider is not None:
             self.cloud_provider = cloud_provider
-        elif self.settings.cloud_llm_enabled and self.settings.cloud_llm_base_url and self.settings.cloud_llm_model:
+        elif self.settings.cloud_llm_enabled and self.settings.cloud_llm_base_url:
             self.cloud_provider = OpenAICompatibleProvider()
         elif self.settings.gemini_api_key:
             self.cloud_provider = GeminiProvider()
         else:
             self.cloud_provider = MockLLMProvider()
-        self._logger = logging.getLogger("app.llm.router")
+
+        self._logger.info(
+            "[LLM] local=%s cloud=%s gateway=%s mode=%s",
+            self._provider_model(self.local_provider),
+            self._provider_model(self.cloud_provider),
+            getattr(self.cloud_provider, "base_url", "-"),
+            self.settings.llm_mode,
+        )
+
+    @staticmethod
+    def _provider_model(provider: Any) -> str:
+        model = getattr(provider, "model", None)
+        if model:
+            return str(model)
+        return provider.__class__.__name__
 
     def _is_simple_question(self, question: str | None) -> bool:
         if not question:
@@ -86,7 +105,7 @@ class LLMRouter:
         if isinstance(self.cloud_provider, MockLLMProvider):
             return False
         if isinstance(self.cloud_provider, OpenAICompatibleProvider):
-            return self.settings.cloud_llm_enabled and bool(self.settings.cloud_llm_model)
+            return self.settings.cloud_llm_enabled and bool(self.settings.cloud_llm_base_url)
         return bool(self.settings.gemini_api_key)
 
     def choose(self, question: str | None = None) -> LLMProvider:
@@ -95,17 +114,30 @@ class LLMRouter:
 
         mode = self.settings.llm_mode
         cloud_available = self._cloud_available()
+        complex_task = self._is_complex_task(question)
 
         if mode == "cloud":
             if cloud_available:
+                self._logger.info("[LLM ROUTER] route=cloud reason=mode_cloud model=%s", self._provider_model(self.cloud_provider))
                 return FaultTolerantProvider(local=self.local_provider, cloud=self.cloud_provider)
+            self._logger.warning("[LLM ROUTER] route=local reason=cloud_unavailable")
             return self.local_provider
 
         if mode in {"auto", "hybrid"}:
-            if cloud_available and self.settings.hybrid_cloud_for_complex and self._is_complex_task(question):
+            if cloud_available and self.settings.hybrid_cloud_for_complex and complex_task:
+                self._logger.info(
+                    "[LLM ROUTER] route=cloud reason=complex_task model=%s",
+                    self._provider_model(self.cloud_provider),
+                )
                 return FaultTolerantProvider(local=self.local_provider, cloud=self.cloud_provider)
+            self._logger.info(
+                "[LLM ROUTER] route=local reason=%s model=%s",
+                "simple_task" if not complex_task else "cloud_disabled_or_not_required",
+                self._provider_model(self.local_provider),
+            )
             return self.local_provider
 
+        self._logger.info("[LLM ROUTER] route=local reason=mode_local model=%s", self._provider_model(self.local_provider))
         return self.local_provider
 
     def route_name(self, question: str | None = None) -> str:
@@ -121,6 +153,9 @@ class LLMRouter:
             "provider_name": provider.__class__.__name__,
             "allow_cloud_llm": self.settings.allow_cloud_llm,
             "cloud_llm_enabled": self.settings.cloud_llm_enabled,
+            "cloud_llm_base_url": self.settings.cloud_llm_base_url,
+            "cloud_llm_model": self.settings.cloud_llm_model or "alpha",
+            "cloud_available": self._cloud_available(),
             "allow_web": self.settings.allow_web,
             "allowed_directories": [str(path) for path in self.settings.allowed_directories],
         }
@@ -147,6 +182,7 @@ class FaultTolerantProvider:
             try:
                 if attempt:
                     await asyncio.sleep(self.base_backoff * (2 ** (attempt - 1)))
+                self._logger.info("[LLM ROUTER] provider=9router attempt=%d", attempt + 1)
                 return await self.cloud.complete(messages, tools=tools, temperature=temperature)
             except (GeminiAPIError, OpenAICompatibleAPIError) as exc:
                 last_exc = exc
@@ -161,7 +197,7 @@ class FaultTolerantProvider:
             raise last_exc or RuntimeError("Cloud provider failed")
 
         try:
-            self._logger.warning("Cloud unavailable; falling back to local provider")
+            self._logger.warning("[LLM ROUTER] cloud_unavailable fallback=local")
             return await self.local.complete(messages, tools=tools, temperature=temperature)
         except Exception as exc:
             raise last_exc or exc from exc
