@@ -29,6 +29,15 @@ def test_active_session_accepts_commands_without_wake_word():
     assert decision.activated is False
 
 
+def test_close_command_is_not_confused_with_ending_interaction():
+    manager = InteractionManager(enabled=True, wake_words="alpha")
+    manager.decide("alpha")
+    decision = manager.decide("fechar o chrome")
+    assert decision.accepted is True
+    assert decision.ended is False
+    assert decision.command == "fechar o chrome"
+
+
 def test_end_word_returns_to_dormant():
     manager = InteractionManager(enabled=True, wake_words="alpha")
     manager.decide("alpha")
