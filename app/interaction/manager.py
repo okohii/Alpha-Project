@@ -17,7 +17,12 @@ class InteractionDecision:
 
 
 class InteractionManager:
-    """Deterministic gate between microphone transcription and AgentCore."""
+    """Deterministic gate between microphone transcription and AgentCore.
+
+    The inactivity timeout is armed only after ALPHA finishes speaking. Time
+    spent waiting for the user, processing a command, or generating speech
+    never consumes the 25-second inactivity window.
+    """
 
     def __init__(self, *, enabled: bool, wake_words: str, timeout_seconds: float = 25.0,
                  end_words: str = "sair,encerrar,parar,fechar,descansar,até mais") -> None:
@@ -26,7 +31,8 @@ class InteractionManager:
         self._wake_words = wake_words
         self._end_words = {normalize(x) for x in str(end_words).split(",") if normalize(x)}
         self.active = not enabled
-        self.last_activity = time.monotonic() if self.active else 0.0
+        self.last_activity = 0.0
+        self._timeout_armed = False
 
     @property
     def state(self) -> str:
@@ -49,32 +55,38 @@ class InteractionManager:
         if not raw:
             return InteractionDecision(False, reason="empty")
         if not self.enabled:
-            self.last_activity = time.monotonic()
+            self.active = True
+            self._timeout_armed = False
             return InteractionDecision(True, command=raw, reason="wake_word_disabled")
         if self.active:
             if self._is_end(raw):
                 self.active = False
                 self.last_activity = 0.0
+                self._timeout_armed = False
                 return InteractionDecision(False, ended=True, reason="end_word")
-            self.last_activity = time.monotonic()
+            # User activity never starts/restarts the timeout. It is armed only
+            # by touch_activity(), called after ALPHA finishes speaking.
+            self._timeout_armed = False
             return InteractionDecision(True, command=raw, reason="active_session")
         found, command = strip_wake_word(raw, self._wake_words)
         if not found:
             return InteractionDecision(False, reason="wake_word_missing")
         self.active = True
-        self.last_activity = time.monotonic()
+        self.last_activity = 0.0
+        self._timeout_armed = False
         command = (command or "").strip(" .,!?;:\n\t")
         if not command:
             return InteractionDecision(False, activated=True, command="", wake_word=find_wake_word(raw, self._wake_words), reason="wake_word_only")
         return InteractionDecision(True, activated=True, command=command, wake_word=find_wake_word(raw, self._wake_words), reason="wake_word")
 
     def touch_activity(self) -> None:
-        """Restart the inactivity window after a completed interaction turn."""
+        """Arm/restart the inactivity timeout after ALPHA finishes speaking."""
         if self.active:
             self.last_activity = time.monotonic()
+            self._timeout_armed = True
 
     def expired(self, now: float | None = None) -> bool:
-        if not self.enabled or not self.active:
+        if not self.enabled or not self.active or not self._timeout_armed:
             return False
         current = time.monotonic() if now is None else now
         return current - self.last_activity >= self.timeout_seconds
@@ -82,3 +94,4 @@ class InteractionManager:
     def expire(self) -> None:
         self.active = False
         self.last_activity = 0.0
+        self._timeout_armed = False
