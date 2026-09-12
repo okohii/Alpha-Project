@@ -1,14 +1,17 @@
 :root {
   --text: rgba(255, 255, 255, 0.92);
   --text-dim: rgba(255, 255, 255, 0.55);
+  --window-key: #05060c;
   font-family: "Segoe UI", "Inter", system-ui, sans-serif;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
-  background-color: transparent !important;
-  background: transparent !important;
+  /* No Windows, o desktop.py remove esta cor com Win32 color-key. Manter a
+     mesma cor evita o "quadrado" atrás do WebGL quando o canvas tem alpha=0. */
+  background-color: var(--window-key) !important;
+  background: var(--window-key) !important;
   height: 100%;
   width: 100%;
   overflow: hidden;
@@ -17,8 +20,7 @@ html, body {
   -webkit-app-region: drag;
 }
 
-/* Rede de segurança: duplo clique no avatar alterna fundo sólido escuro
-   (útil quando a transparência do WebView2 não compõe o desktop). */
+/* Modo sólido explícito para diagnóstico/compatibilidade. */
 body.solid {
   background-color: #05060c !important;
   background: #05060c !important;
