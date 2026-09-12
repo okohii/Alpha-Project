@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Sequence
 from uuid import uuid4
 
@@ -48,8 +48,8 @@ class MemoryItem:
 class MemoryService:
     """Orquestra memória sem acoplar Agent ao backend.
 
-    Working memory é deliberadamente transitória e fica em RAM. Episodic,
-    semantic e preferences usam MemoryRepository e SQLite nesta etapa.
+    Working memory é transitória e fica em RAM. Episodic, semantic e preferences
+    usam MemoryRepository e SQLite nesta etapa.
     """
 
     def __init__(self, repository: MemoryRepositoryProtocol, embedding_provider: EmbeddingProvider) -> None:
@@ -86,10 +86,7 @@ class MemoryService:
         }
         if raw in aliases:
             return aliases[raw]
-        detected = detect_kind(content)
-        if detected == "preferencia":
-            return MemoryType.PREFERENCE.value
-        return MemoryType.SEMANTIC.value
+        return MemoryType.PREFERENCE.value if detect_kind(content) == "preferencia" else MemoryType.SEMANTIC.value
 
     async def save_memory(
         self,
@@ -125,15 +122,11 @@ class MemoryService:
         metadata = dict(metadata or {})
         if resolved_type == MemoryType.PREFERENCE:
             metadata.setdefault("preference_key", preference_key(content, metadata))
-            importance = 1.0
             resolved_importance = 1.0
-
-        # Preferences/facts should be based on the most recent explicit value.
-        if resolved_type == MemoryType.PREFERENCE:
             key = metadata["preference_key"]
             existing = await self.repository.list(limit=50, memory_type=MemoryType.PREFERENCE.value)
             for old in existing:
-                if (old.metadata_ or {}).get("preference_key") == key and old.id:
+                if (old.metadata_ or {}).get("preference_key") == key:
                     await self.repository.delete(old.id)
 
         embedding = await self.embedding_provider.embed(content)
@@ -188,11 +181,9 @@ class MemoryService:
         confidence: float = 1.0,
         metadata: dict[str, Any] | None = None,
     ) -> MemoryItem | None:
-        kind = detect_kind(user_message or "")
-        if kind == "preferencia":
+        if detect_kind(user_message or "") == "preferencia":
             return await self.save_preference(user_message.strip(), source="agent", confidence=confidence, metadata=metadata)
         tools = tool_names or []
-        # Only important episodes are persisted. Ordinary chat is intentionally discarded.
         importance = 0.85 if tools else self.score_importance(user_message)
         if importance < self.settings.memory_min_importance:
             return None
@@ -233,8 +224,12 @@ class MemoryService:
         return [self._to_item(memory) for memory in memories if not is_expired(memory.expiration)]
 
     async def load_profile(self, limit: int = 50) -> list[MemoryItem]:
-        memories = await self.repository.list(limit=limit, memory_type=MemoryType.SEMANTIC.value)
-        return [self._to_item(m) for m in memories if (m.metadata_ or {}).get("profile") and not is_expired(m.expiration)]
+        """Retorna perfil e preferências persistentes para o contexto base do agente."""
+        semantic = await self.repository.list(limit=limit, memory_type=MemoryType.SEMANTIC.value)
+        preferences = await self.repository.list(limit=limit, memory_type=MemoryType.PREFERENCE.value)
+        items = [self._to_item(m) for m in [*semantic, *preferences] if not is_expired(m.expiration)]
+        items.sort(key=lambda item: (item.importance, item.updated_at), reverse=True)
+        return items[:limit]
 
     async def search_memories(
         self,
