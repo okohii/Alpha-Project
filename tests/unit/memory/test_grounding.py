@@ -1,8 +1,4 @@
-"""Grounding de memória: busca separada da decisão.
-
-Garante que memórias irrelevantes NÃO viram contexto operacional do agente e
-que memória recuperada nunca é tratada como instrução de ação.
-"""
+"""Grounding de memória: busca separada da decisão."""
 from __future__ import annotations
 
 import uuid
@@ -14,7 +10,7 @@ from app.agent.agent import AgentCore
 from app.llm.base import LLMResponse
 from app.llm.router import LLMRouter
 from app.memory.embeddings import LocalEmbeddingProvider
-from app.memory.repository import MemoryRepository
+from app.memory.repository import SqliteMemoryRepository
 from app.memory.service import MemoryService
 from app.tools.registry import ToolRegistry
 
@@ -71,7 +67,7 @@ MEMORY_ROWS = [
 async def test_repository_filters_irrelevant_memories():
     provider = LocalEmbeddingProvider()
     rows = [FakeRow(content, await provider.embed(content)) for content in MEMORY_ROWS]
-    repo = MemoryRepository(FakeSession(rows))
+    repo = SqliteMemoryRepository(FakeSession(rows))
     query_embedding = await provider.embed("Quem é Ellen?")
 
     results = await repo.search_by_embedding(
@@ -89,7 +85,7 @@ async def test_repository_filters_irrelevant_memories():
 async def test_service_passes_min_score_through():
     provider = LocalEmbeddingProvider()
     rows = [FakeRow(content, await provider.embed(content)) for content in MEMORY_ROWS]
-    service = MemoryService(MemoryRepository(FakeSession(rows)), provider)
+    service = MemoryService(SqliteMemoryRepository(FakeSession(rows)), provider)
 
     results = await service.search_memories("Quem é Ellen?", limit=10, min_score=0.15)
 
@@ -101,7 +97,6 @@ async def test_service_passes_min_score_through():
 
 @pytest.mark.anyio
 async def test_agent_memory_context_only_relevant():
-    """O contexto injetado contém apenas memórias relevantes a Ellen."""
     seen_messages: list[list] = []
 
     class CapturingProvider:
@@ -115,7 +110,7 @@ async def test_agent_memory_context_only_relevant():
     class GroundedService:
         async def search_memories(self, query, limit=5, min_score=0.0):
             assert min_score > 0
-            results = await MemoryRepository(FakeSession(rows)).search_by_embedding(
+            results = await SqliteMemoryRepository(FakeSession(rows)).search_by_embedding(
                 await provider.embed(query), limit=limit, keyword=query, min_score=min_score
             )
             return results
