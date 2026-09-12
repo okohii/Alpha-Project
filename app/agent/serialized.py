@@ -29,20 +29,29 @@ class SerializedAgentCore(AgentCore):
     convertido em execução.
     """
 
+    _conversation_by_bus: dict[int, str] = {}
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._turn_lock = asyncio.Lock()
 
+    def _conversation_id_for_turn(self, conversation_id: str | None) -> str:
+        if conversation_id:
+            return conversation_id
+        bus = getattr(self, "event_bus", None)
+        key = id(bus) if bus is not None else id(self)
+        existing = self._conversation_by_bus.get(key)
+        if existing is not None:
+            return existing
+        from uuid import uuid4
+
+        created = str(uuid4())
+        self._conversation_by_bus[key] = created
+        return created
+
     async def chat(self, message: str, conversation_id: str | None = None) -> dict[str, Any]:
         async with self._turn_lock:
-            if conversation_id is None:
-                conversation_id = getattr(self, "_default_conversation_id", None)
-                if conversation_id is None:
-                    from uuid import uuid4
-
-                    conversation_id = str(uuid4())
-                    self._default_conversation_id = conversation_id
-            return await super().chat(message, conversation_id)
+            return await super().chat(message, self._conversation_id_for_turn(conversation_id))
 
     async def chat_stream(
         self,
@@ -50,13 +59,7 @@ class SerializedAgentCore(AgentCore):
         conversation_id: str | None = None,
     ) -> AsyncIterator[Any]:
         async with self._turn_lock:
-            if conversation_id is None:
-                conversation_id = getattr(self, "_default_conversation_id", None)
-                if conversation_id is None:
-                    from uuid import uuid4
-
-                    conversation_id = str(uuid4())
-                    self._default_conversation_id = conversation_id
+            conversation_id = self._conversation_id_for_turn(conversation_id)
             async for event in super().chat_stream(message, conversation_id):
                 yield event
 
@@ -94,7 +97,7 @@ class SerializedAgentCore(AgentCore):
                     "sem alegar que pesquisou, abriu, salvou ou executou algo. "
                     "Nunca escreva JSON de tool call no texto."
                 ),
-            )
+            ),
         )
         retry = await super()._provider_turn(provider, retry_messages, tools, stream_tokens)
         if not retry.tool_calls:
@@ -122,8 +125,6 @@ class SerializedAgentCore(AgentCore):
         if not available:
             return False
         lower = content.lower()
-        # O modelo precisa mencionar uma tool conhecida ou uma intenção forte
-        # de ação/pesquisa. Isso evita re-tentativas em conversa normal.
         mentions_tool = any(name in lower for name in available)
         strong_intent = bool(_TOOL_INTENT_RE.search(content))
         return mentions_tool or strong_intent
