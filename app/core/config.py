@@ -12,13 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 def _default_allowed_directories() -> list[Path]:
     """Diretórios padrão liberados quando nada é configurado em ALLOWED_DIRECTORIES."""
     home = Path.home()
-    candidates = [
-        Path.cwd(),
-        home,
-        home / "Downloads",
-        home / "Documents",
-        home / "Desktop",
-    ]
+    candidates = [Path.cwd(), home, home / "Downloads", home / "Documents", home / "Desktop"]
     result: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -45,15 +39,25 @@ class Settings(BaseSettings):
     ollama_vision_model: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1/models"
     gemini_model: str = "gemini-3.6-flash"
-    gemini_api_key: str = Field(
-        default="",
-        validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY", "API_KEY"),
-    )
-    llm_mode: Literal["local", "cloud", "auto"] = "local"
+    gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY", "API_KEY"))
+
+    # Gateway OpenAI-compatible opcional (ex.: 9Router). O gateway decide o
+    # provedor/modelo final; ALPHA não gerencia nem tenta contornar quotas.
+    cloud_llm_enabled: bool = False
+    cloud_llm_base_url: str = "http://127.0.0.1:20128/v1"
+    cloud_llm_api_key: str = ""
+    cloud_llm_model: str = ""
+    cloud_llm_timeout_seconds: float = 120.0
+
+    llm_mode: Literal["local", "cloud", "auto", "hybrid"] = "local"
     allow_cloud_llm: bool = True
     allow_web: bool = True
 
-    # Perfil de inferência local com foco em comandos curtos e baixa latência.
+    # Roteamento determinístico: tarefas simples permanecem locais; sinais de
+    # execução multi-etapas/computador/web podem ir para o gateway em hybrid.
+    hybrid_cloud_for_complex: bool = True
+    hybrid_cloud_fallback: bool = True
+
     llm_temperature: float = 0.15
     llm_num_ctx: int = 8192
     llm_num_predict: int = 256
@@ -80,7 +84,6 @@ class Settings(BaseSettings):
     tts_speed: float = 1.0
     tts_device: str = "auto"
     tts_streaming: bool = True
-
     tts_emotion_enabled: bool = True
     tts_default_emotion: str = "neutral"
     tts_emotion_max_intensity: float = 1.0
@@ -102,28 +105,17 @@ class Settings(BaseSettings):
 
     scheduler_enabled: bool = True
     scheduler_interval_seconds: float = 15.0
-
     code_exec_timeout_seconds: float = 30.0
     allow_shell_exec: bool = False
 
-    allowed_directories_env: str = Field(
-        default="",
-        validation_alias=AliasChoices("ALLOWED_DIRECTORIES", "MANAGED_DIRECTORIES"),
-        description="Diretórios permitidos separados por os.pathsep (; no Windows, "
-        ": no Linux/macOS)",
-    )
-
+    allowed_directories_env: str = Field(default="", validation_alias=AliasChoices("ALLOWED_DIRECTORIES", "MANAGED_DIRECTORIES"), description="Diretórios permitidos separados por os.pathsep (; no Windows, : no Linux/macOS)")
     system_prompt_path: Path = Path("app/agent/prompts/system_prompt.pt-BR.txt")
-
     log_level: str = "INFO"
     debug_sensitive_logging: bool = False
-
     offline_timeout_seconds: float = 2.5
     llm_timeout_seconds: float = 120.0
     web_timeout_seconds: float = 10.0
-
     use_sqlite_for_tests: bool = False
-
     overlay_host: str = "127.0.0.1"
     overlay_port: int = 18080
 
