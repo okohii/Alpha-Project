@@ -82,7 +82,7 @@ class AvatarSession:
         try:
             while not self.cancel_event.is_set() and asyncio.get_running_loop().time()<deadline and self._confirmation_pending:
                 try:
-                    path=await asyncio.to_thread(audio_io.record_microphone_vad,max_wait=8.0,silence_pad=0.80,min_speech_duration=0.25)
+                    path=await asyncio.to_thread(audio_io.record_microphone_vad,max_wait=8.0,silence_pad=0.80,min_speech_duration=0.25,abort_event=threading.Event())
                 except audio_io.MicrophoneRecordingError as exc:
                     logger.exception("[confirm] microphone_error: %s",exc); return
                 if path is None:
@@ -154,7 +154,7 @@ class AvatarSession:
                 text=carry;carry=None
                 if text is None:
                     self.event_bus.emit(EventType.assistant_listening); logger.info("[voice] capture_wait")
-                    try:path=await asyncio.to_thread(audio_io.record_microphone_vad,max_wait=60.0)
+                    try:path=await asyncio.to_thread(audio_io.record_microphone_vad,max_wait=60.0,abort_event=threading.Event())
                     except audio_io.MicrophoneRecordingError as exc:logger.exception("[voice] microphone_error");await self.push({"type":"error","message":f"microfone indisponível: {exc}"});return
                     if path is None:logger.debug("[voice] capture_no_speech");continue
                     logger.info("[voice] capture_audio=%s",path)
@@ -190,10 +190,15 @@ class AvatarSession:
         try:player,frame_rate,n_frames=await asyncio.to_thread(audio_io.play_wav_async,audio_path)
         except audio_io.AudioPlaybackError as exc:logger.exception("[voice] playback_error");await self.push({"type":"error","message":f"áudio indisponível: {exc}"});return
         duration=n_frames/frame_rate if frame_rate else 0.0; logger.info("[voice] playback_running duration=%.2fs rate=%d frames=%d player=%s",duration,frame_rate,n_frames,player)
+        await self.push({"type":"avatar_show","animation":"speak","duration_ms":max(1,int(duration*1000))})
+        await self.push({"type":"state","state":"speaking","animation":"speak","expression":"speaking","emotion":None,"idle_after_ms":0})
         energy_task=asyncio.create_task(self._emit_speech_energy(audio_path))
         try: await asyncio.sleep(duration + 0.35)
         finally:
             energy_task.cancel(); await asyncio.to_thread(audio_io.stop_wav_async,player); logger.info("[voice] playback_end path=%s",audio_path)
+            if not self.cancel_event.is_set():
+                next_state="listening" if self._interaction is not None and self._interaction.active else "idle"
+                await self.push({"type":"state","state":next_state,"animation":"idle","expression":"neutral","emotion":None,"idle_after_ms":0})
     async def _emit_speech_energy(self,audio_path:Path)->None:
         try:
             with wave.open(str(audio_path),"rb") as wav:
@@ -238,6 +243,3 @@ async def avatar_index()->FileResponse:return FileResponse(UI_DIR/"index.html")
 
 @router.get("/ui/{file_path}",include_in_schema=False)
 async def avatar_asset(file_path:str)->FileResponse:
-    candidate=(UI_DIR/file_path).resolve()
-    if candidate.parent!=UI_DIR.resolve() or not candidate.is_file():return FileResponse(UI_DIR/"index.html")
-    return FileResponse(candidate)
