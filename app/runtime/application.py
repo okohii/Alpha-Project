@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agent.planner import Planner
-from app.agent.serialized import SerializedAgentCore
+from app.agent.reliable import ReliableAgentCore
 from app.assistant.facilitator import AssistantFacilitator
 from app.calendar.service import CalendarRepository, CalendarService
 from app.core.config import get_settings
@@ -32,7 +32,7 @@ async def build_agent(
     permission_prompt: Callable[[str], Awaitable[bool]] | None = None,
     event_bus: Any | None = None,
     cancel_event: asyncio.Event | None = None,
-) -> SerializedAgentCore:
+) -> ReliableAgentCore:
     memory_repository = SqliteMemoryRepository(session)
     memory_service = MemoryService(memory_repository, LocalEmbeddingProvider())
 
@@ -123,7 +123,7 @@ async def build_agent(
     facilitator = AssistantFacilitator(skill_registry=skill_registry)
     planner = Planner()
 
-    return SerializedAgentCore(
+    return ReliableAgentCore(
         llm_router=LLMRouter(local_provider=ConfiguredOllamaProvider()),
         tool_registry=tool_registry,
         memory_service=memory_service,
