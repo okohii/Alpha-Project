@@ -17,12 +17,6 @@ logger = logging.getLogger("app.speech.pipeline")
 
 
 def _is_internal_content(text: str) -> bool:
-    """JSON interno do LLM que NUNCA deve ser falado?
-
-    Chamadas de ferramenta costumam aparecer como dict com ``name``/
-    ``arguments``/``tool_calls``. Se chegar aqui, algo falhou a montante, mas a
-    barreira de segurança fica nesta camada também (Problema 6).
-    """
     stripped = (text or "").strip()
     if not stripped.startswith("{"):
         return False
@@ -51,8 +45,9 @@ class VoicePipeline:
         delivery_processor: DeliveryProcessor | None = None,
     ) -> None:
         self.listener = listener or PushToTalkAudioListener()
-        self.stt = stt or FasterWhisperSTT()
-        self.tts = tts or KokoroTTS()
+        # Modelos ficam lazy: criar o pipeline não deve bloquear o início da escuta.
+        self.stt = stt
+        self.tts = tts
         self.event_bus = event_bus
         self.emotion_controller = emotion_controller or EmotionController()
         self.delivery_processor = delivery_processor or DeliveryProcessor()
@@ -60,29 +55,35 @@ class VoicePipeline:
     def _bus(self) -> EventBus:
         return self.event_bus or EventBus()
 
+    def _get_stt(self) -> FasterWhisperSTT:
+        if self.stt is None:
+            self.stt = FasterWhisperSTT()
+        return self.stt
+
+    def _get_tts(self) -> KokoroTTS:
+        if self.tts is None:
+            self.tts = KokoroTTS()
+        return self.tts
+
     async def process(self, audio_path: Path) -> dict[str, Any]:
         event_bus = self._bus()
         event_bus.emit(EventType.assistant_listening)
-
         await self.listener.start()
-
         try:
             event_bus.emit(EventType.assistant_transcribing)
-
-            transcription = await self.stt.transcribe(audio_path)
-
+            transcription = await self._get_stt().transcribe(audio_path)
             return {
                 "transcription": transcription.text,
                 "language": transcription.language,
                 "segments": transcription.segments,
+                "confidence": transcription.confidence,
+                "is_suspicious": transcription.is_suspicious,
             }
-
         finally:
             await self.listener.stop()
             event_bus.emit(EventType.assistant_thinking)
 
     async def speak(self, text: str) -> dict[str, Any]:
-        """API legada: sintetiza com emoção resolvida do texto."""
         return await self.speak_expressive(text)
 
     async def speak_expressive(
@@ -91,24 +92,11 @@ class VoicePipeline:
         *,
         emotion: EmotionState | None = None,
     ) -> dict[str, Any]:
-        """Sintetiza a fala respeitando o estado emocional.
-
-        Fluxo: ``text`` → ``EmotionController`` → ``DeliveryProfile`` →
-        ``KokoroTTS`` → WAV. ``emotion`` explícito tem prioridade; caso
-        contrário é derivado do texto (determinístico, sem outro LLM).
-
-        Retorna também os metadados ``emotion``/``delivery`` para consumo
-        futuro por avatar e UI — sem duplicar a lógica emocional.
-        """
         try:
             settings = get_settings()
             prepared = self.delivery_processor.prepare(text)
-
             if _is_internal_content(text):
-                logger.warning(
-                    "[tts] source=internal_content_blocked len=%d json=tool_call_payload",
-                    len(text),
-                )
+                logger.warning("[tts] source=internal_content_blocked len=%d", len(text))
                 return {
                     "status": "text_only",
                     "detail": "conteúdo interno bloqueado no TTS",
@@ -119,24 +107,8 @@ class VoicePipeline:
                 state: EmotionState | None = EmotionState()
                 profile: DeliveryProfile | None = None
             else:
-                state = (
-                    emotion
-                    if emotion is not None
-                    else self.emotion_controller.resolve(prepared)
-                )
+                state = emotion if emotion is not None else self.emotion_controller.resolve(prepared)
                 profile = self.emotion_controller.build_profile(state)
-
-            if emotion is not None:
-                logger.info(
-                    "[emotion] source=explicit emotion=%s confidence=1.0",
-                    emotion.emotion.value,
-                )
-            else:
-                logger.info(
-                    "[emotion] source=heuristic emotion=%s confidence=%.2f",
-                    state.emotion.value,
-                    state.confidence,
-                )
 
             event_bus = self._bus()
             event_bus.emit(
@@ -149,26 +121,12 @@ class VoicePipeline:
                 },
             )
 
-            audio_path = await self.tts.synthesize(prepared, delivery=profile)
-
-            logger.info(
-                "[tts] source=final_response emotion=%s intensity=%.2f confidence=%.2f speed=%.2f",
-                state.emotion.value,
-                state.intensity,
-                state.confidence,
-                profile.speed if profile is not None else 1.0,
-            )
-
+            audio_path = await self._get_tts().synthesize(prepared, delivery=profile)
             return {
                 "audio_path": str(audio_path),
                 "status": "ok",
                 "emotion": state.to_dict(),
                 "delivery": profile.to_dict() if profile is not None else None,
             }
-
         except TextToSpeechError as exc:
-            return {
-                "status": "text_only",
-                "detail": str(exc),
-                "text": text,
-            }
+            return {"status": "text_only", "detail": str(exc), "text": text}
