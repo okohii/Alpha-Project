@@ -71,9 +71,10 @@ class _WebSocketThread(threading.Thread):
         self._ws: Any = None
 
     def send(self, payload: dict[str, Any]) -> None:
-        self._outgoing.put(payload)
+        if not self._stop_event.is_set():
+            self._outgoing.put(payload)
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 2.0) -> None:
         self._stop_event.set()
         ws = self._ws
         if ws is not None:
@@ -81,6 +82,8 @@ class _WebSocketThread(threading.Thread):
                 ws.close()
             except Exception:
                 pass
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout=max(0.0, timeout))
 
     def run(self) -> None:
         try:
@@ -114,8 +117,9 @@ class _WebSocketThread(threading.Thread):
                         except json.JSONDecodeError:
                             logger.debug("[DESKTOP] mensagem WS inválida ignorada")
             except Exception as exc:  # noqa: BLE001 - reconexão do shell
-                self.incoming.put({"type": "connection_error", "message": str(exc)})
-                self._stop_event.wait(0.6)
+                if not self._stop_event.is_set():
+                    self.incoming.put({"type": "connection_error", "message": str(exc)})
+                    self._stop_event.wait(0.6)
             finally:
                 ws = self._ws
                 self._ws = None
@@ -136,6 +140,7 @@ class NativeAlphaWindow(QWidget):
         self.ws = _WebSocketThread(ws_url, self.incoming)
         self.conversation_id: str | None = None
         self._drag_origin: QPoint | None = None
+        self._closing = False
 
         self.setWindowTitle("ALPHA")
         self.resize(width, height)
@@ -188,7 +193,7 @@ class NativeAlphaWindow(QWidget):
         self.status_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_overlay.setStyleSheet(
             "QLabel { background: transparent; border: none; font-size: 12px; "
-            "font-weight: 600; padding: 2px; }"
+            "font-weight: bold; padding: 2px; }"
         )
         self.status_overlay.setGeometry(12, max(0, self.height() - 54), self.width() - 24, 24)
         self.status_overlay.raise_()
@@ -231,8 +236,6 @@ class NativeAlphaWindow(QWidget):
 
         self.core = AstralCore(root)
         self.core.setMinimumSize(240, 240)
-        # O QQuickWidget usa uma superfície própria; no chat ela precisa ser
-        # exatamente da mesma cor da janela para não criar um retângulo preto.
         self.core.setStyleSheet("background: #080a18; border: none;")
         outer.addWidget(self.core, 1, Qt.AlignmentFlag.AlignCenter)
 
@@ -288,7 +291,7 @@ class NativeAlphaWindow(QWidget):
         super().mouseReleaseEvent(event)
 
     def _send_chat(self) -> None:
-        if self.mode != "chat":
+        if self.mode != "chat" or self._closing:
             return
         text = self.input.text().strip()
         if not text:
@@ -301,7 +304,8 @@ class NativeAlphaWindow(QWidget):
         self.ws.send(payload)
 
     def _send(self, payload: dict[str, Any]) -> None:
-        self.ws.send(payload)
+        if not self._closing:
+            self.ws.send(payload)
 
     def _append_log(self, author: str, text: str) -> None:
         if self.mode != "chat":
@@ -330,7 +334,7 @@ class NativeAlphaWindow(QWidget):
         self.status_overlay.setText(f"{_STATE_ICONS[state]}  {_STATE_LABELS[state]}")
         self.status_overlay.setStyleSheet(
             f"QLabel {{ background: transparent; border: none; color: {color}; "
-            "font-size: 12px; font-weight: 600; padding: 2px; }}"
+            "font-size: 12px; font-weight: bold; padding: 2px; }}"
         )
         self.activity.setText(activity)
         self.activity.setStyleSheet(
@@ -424,10 +428,17 @@ class NativeAlphaWindow(QWidget):
         self.log_layout.insertWidget(max(0, self.log_layout.count() - 1), box)
 
     def closeEvent(self, event: Any) -> None:  # noqa: N802
+        if self._closing:
+            event.accept()
+            return
+        self._closing = True
+        self._timer.stop()
         try:
-            self._send({"action": "close"})
-            self.ws.stop()
+            self.ws.send({"action": "close"})
+        except Exception:
+            pass
         finally:
+            self.ws.stop(timeout=2.0)
             event.accept()
 
 
@@ -445,7 +456,7 @@ def run_native(*, mode: str, host: str, port: int, width: int, height: int) -> i
     """Abre uma UI Qt nativa; FastAPI continua apenas como backend local."""
     from PySide6.QtWidgets import QApplication
 
-    server, _thread = start_backend(host, port)
+    server, backend_thread = start_backend(host, port)
     ws_path = "avatar" if mode == "avatar" else "overlay"
     ws_url = f"ws://{host}:{port}/{ws_path}/ws"
 
@@ -456,7 +467,15 @@ def run_native(*, mode: str, host: str, port: int, width: int, height: int) -> i
     try:
         return int(app.exec())
     finally:
+        try:
+            if not window._closing:
+                window.close()
+        except Exception:
+            pass
         server.should_exit = True
+        if backend_thread.is_alive():
+            backend_thread.join(timeout=3.0)
+        logger.info("[DESKTOP] native shutdown complete")
 
 
 __all__ = ["NativeAlphaWindow", "run_native", "start_backend"]
