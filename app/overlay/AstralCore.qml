@@ -29,6 +29,21 @@ Item {
         state === "thinking" || state === "planning" ? 0.10 :
         state === "executing" || state === "verifying" ? 0.17 : 0.055
 
+    // 2D fallback/halo: keeps the Astral Core visibly grounded even when
+    // Windows/Qt Quick 3D transparency composition is weak.
+    Rectangle {
+        anchors.centerIn: parent
+        width: Math.min(parent.width, parent.height) * (0.42 + root.energy * 0.08 + root.statePulse * 0.08)
+        height: width
+        radius: width / 2
+        color: root.accent
+        opacity: 0.07 + root.energy * 0.10 + root.statePulse * 0.12
+        border.color: root.accent
+        border.width: 1
+        Behavior on width { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: 70; easing.type: Easing.OutCubic } }
+    }
+
     View3D {
         anchors.fill: parent
         camera: camera
