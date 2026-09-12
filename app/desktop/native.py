@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from html import escape
 from queue import Empty, Queue
 from typing import Any
 
-from PySide6.QtCore import QPoint, QTimer, Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
@@ -55,17 +56,16 @@ class _WebSocketThread(threading.Thread):
 
 class NativeAlphaWindow(QWidget):
     def __init__(self,*,mode:str,ws_url:str,width:int,height:int)->None:
-        super().__init__();self.mode=mode;self.incoming=Queue();self.ws=_WebSocketThread(ws_url,self.incoming);self.conversation_id=None;self._drag_origin=None;self._closing=False
+        super().__init__();self.mode=mode;self.incoming=Queue();self.ws=_WebSocketThread(ws_url,self.incoming);self.conversation_id=None;self._drag_origin=None;self._closing=False;self._chat_history:list[tuple[str,str]]=[]
         self.setWindowTitle("ALPHA");self.resize(width,height);self.setMinimumSize(420,520) if mode=="chat" else self.setMinimumSize(240,240);self.setWindowFlags(Qt.WindowType.FramelessWindowHint|Qt.WindowType.WindowStaysOnTopHint|Qt.WindowType.Tool)
         if mode=="avatar":self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground,True);self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground,True);self.setStyleSheet("QWidget { background: transparent; border: none; }")
         else:self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground,False);self.setStyleSheet("QWidget { background: #080a18; color: #e8f7ff; }")
         self._build_ui();self._timer=QTimer(self);self._timer.setInterval(30);self._timer.timeout.connect(self._drain_events);self._timer.start();self.ws.start()
-    def _build_ui(self)->None:
-        self._build_avatar_ui() if self.mode=="avatar" else self._build_chat_ui()
+    def _build_ui(self)->None:self._build_avatar_ui() if self.mode=="avatar" else self._build_chat_ui()
     def _build_avatar_ui(self)->None:
         root=QWidget(self);root.setObjectName("avatarRoot");root.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground,True);root.setStyleSheet("QWidget#avatarRoot { background: transparent; border: none; }");root.setGeometry(self.rect());self.root=root;layout=QVBoxLayout(root);layout.setContentsMargins(0,0,0,0);layout.setSpacing(0);self.core=AstralCore(root);self.core.setMinimumSize(240,240);self.core.setStyleSheet("background: transparent; border: none;");layout.addWidget(self.core,1);self.status_overlay=QLabel(root);self.status_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter);self.status_overlay.setStyleSheet("QLabel { background: transparent; border: none; font-size: 12px; font-weight: bold; padding: 2px; }");self.status_overlay.raise_();self.activity=QLabel(root);self.activity.setAlignment(Qt.AlignmentFlag.AlignCenter);self.activity.setWordWrap(True);self.activity.setStyleSheet("QLabel { background: transparent; border: none; color: #e8f7ff; font-size: 10px; padding: 2px; }");self.activity.raise_();self._update_avatar_hud("idle","Pronto");self.log_area=None
     def _build_chat_ui(self)->None:
-        root=QWidget(self);root.setObjectName("chatRoot");root.setGeometry(self.rect());root.setStyleSheet("QWidget#chatRoot { background: #080a18; color: #e8f7ff; }");self.root=root;outer=QVBoxLayout(root);outer.setContentsMargins(18,14,18,16);outer.setSpacing(8);header=QHBoxLayout();title=QLabel("ALPHA");title.setFont(QFont("Segoe UI",13,QFont.Weight.DemiBold));subtitle=QLabel("ASSISTENTE");subtitle.setStyleSheet("color: #71899a; font-size: 9px;");self.state=QLabel("✦ Repouso");self.state.setStyleSheet("color: #66dfff; font-size: 11px;");close=QPushButton("×");close.setFixedSize(30,28);close.clicked.connect(self.close);header.addWidget(title);header.addWidget(subtitle);header.addStretch(1);header.addWidget(self.state);header.addWidget(close);outer.addLayout(header);self.activity=QLabel("Pronto");self.activity.setStyleSheet("color: #9db8c8; font-size: 10px; background: #080a18;");self.activity.setWordWrap(True);outer.addWidget(self.activity);self.log_area=QScrollArea();self.log_area.setWidgetResizable(True);self.log_area.setFrameShape(QFrame.Shape.NoFrame);self.log_area.setStyleSheet("QScrollArea { background: #080a18; border: none; }");self.log_container=QWidget();self.log_container.setStyleSheet("background: #080a18;");self.log_layout=QVBoxLayout(self.log_container);self.log_layout.setContentsMargins(2,6,2,6);self.log_layout.setSpacing(8);self.log_layout.addStretch(1);self.log_area.setWidget(self.log_container);outer.addWidget(self.log_area,1);row=QHBoxLayout();self.input=QLineEdit();self.input.setPlaceholderText("Fale com o ALPHA…");self.input.setMinimumHeight(38);self.input.returnPressed.connect(self._send_chat);send=QPushButton("Enviar");send.setMinimumHeight(38);send.clicked.connect(self._send_chat);row.addWidget(self.input,1);row.addWidget(send);outer.addLayout(row)
+        root=QWidget(self);root.setObjectName("chatRoot");root.setGeometry(self.rect());root.setStyleSheet("QWidget#chatRoot { background: #080a18; color: #e8f7ff; }");self.root=root;outer=QVBoxLayout(root);outer.setContentsMargins(18,14,18,16);outer.setSpacing(8);header=QHBoxLayout();title=QLabel("ALPHA");title.setFont(QFont("Segoe UI",13,QFont.Weight.DemiBold));subtitle=QLabel("ASSISTENTE");subtitle.setStyleSheet("color: #71899a; font-size: 9px;");self.state=QLabel("✦ Repouso");self.state.setStyleSheet("color: #66dfff; font-size: 11px;");copy_button=QPushButton("Copiar chat");copy_button.setFixedHeight(28);copy_button.clicked.connect(self._copy_chat);close=QPushButton("×");close.setFixedSize(30,28);close.clicked.connect(self.close);header.addWidget(title);header.addWidget(subtitle);header.addStretch(1);header.addWidget(copy_button);header.addWidget(self.state);header.addWidget(close);outer.addLayout(header);self.activity=QLabel("Pronto");self.activity.setStyleSheet("color: #9db8c8; font-size: 10px; background: #080a18;");self.activity.setWordWrap(True);outer.addWidget(self.activity);self.log_area=QScrollArea();self.log_area.setWidgetResizable(True);self.log_area.setFrameShape(QFrame.Shape.NoFrame);self.log_area.setStyleSheet("QScrollArea { background: #080a18; border: none; }");self.log_container=QWidget();self.log_container.setStyleSheet("background: #080a18;");self.log_layout=QVBoxLayout(self.log_container);self.log_layout.setContentsMargins(2,6,2,6);self.log_layout.setSpacing(8);self.log_layout.addStretch(1);self.log_area.setWidget(self.log_container);outer.addWidget(self.log_area,1);row=QHBoxLayout();self.input=QLineEdit();self.input.setPlaceholderText("Fale com o ALPHA…");self.input.setMinimumHeight(38);self.input.returnPressed.connect(self._send_chat);send=QPushButton("Enviar");send.setMinimumHeight(38);send.clicked.connect(self._send_chat);row.addWidget(self.input,1);row.addWidget(send);outer.addLayout(row)
     def resizeEvent(self,event:Any)->None:
         if hasattr(self,"root"):self.root.setGeometry(self.rect())
         if self.mode=="avatar" and hasattr(self,"status_overlay"):self.status_overlay.setGeometry(12,max(0,self.height()-54),self.width()-24,24);self.activity.setGeometry(16,max(0,self.height()-34),self.width()-32,30)
@@ -88,7 +88,17 @@ class NativeAlphaWindow(QWidget):
         if not self._closing:self.ws.send(payload)
     def _append_log(self,author:str,text:str)->None:
         if self.mode!="chat":return
-        label=QLabel(f"<b>{author}</b>  {text}");label.setWordWrap(True);label.setStyleSheet("padding: 8px 10px; color: #ebf5fa; background: #10152a; border-radius: 8px;");self.log_layout.insertWidget(max(0,self.log_layout.count()-1),label);QTimer.singleShot(0,lambda:self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum()))
+        self._chat_history.append((author,text))
+        label=QLabel(f"<b>{escape(author)}</b>  {escape(text)}");label.setWordWrap(True);label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse|Qt.TextInteractionFlag.TextSelectableByKeyboard);label.setStyleSheet("padding: 8px 10px; color: #ebf5fa; background: #10152a; border-radius: 8px;");self.log_layout.insertWidget(max(0,self.log_layout.count()-1),label);QTimer.singleShot(0,lambda:self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum()))
+    def _copy_chat(self)->None:
+        if self.mode!="chat":return
+        if not self._chat_history:
+            self.activity.setText("Não há mensagens para copiar")
+            return
+        text="\n\n".join(f"{author}: {message}" for author,message in self._chat_history)
+        QApplication.clipboard().setText(text)
+        self.activity.setText("Chat copiado para a área de transferência")
+        QTimer.singleShot(2200,lambda:self.activity.setText("Pronto"))
     def _set_state(self,state:str)->None:
         state=state if state in _STATE_LABELS else "idle"
         if self.mode=="chat":self.state.setStyleSheet(f"color: {_STATE_COLORS[state]}; font-size: 11px;");self.state.setText(f"{_STATE_ICONS[state]} {_STATE_LABELS[state]}")
@@ -131,7 +141,7 @@ class NativeAlphaWindow(QWidget):
                 if self.mode=="chat":self.activity.setText("Conectando ao ALPHA Core…")
                 else:self._update_avatar_hud("error","Conectando ao ALPHA Core…")
     def _append_confirmation(self,tool:str,args:str)->None:
-        box=QFrame();box.setStyleSheet("QFrame { background: #332a18; border: 1px solid #8a6a2d; border-radius: 12px; }");row=QHBoxLayout(box);text=QLabel(f"Permitir <b>{tool}</b><br>{args}");text.setWordWrap(True);deny=QPushButton("Negar");allow=QPushButton("Permitir");row.addWidget(text,1);row.addWidget(deny);row.addWidget(allow);deny.clicked.connect(lambda:(self._send({"action":"confirm","approved":False}),box.deleteLater()));allow.clicked.connect(lambda:(self._send({"action":"confirm","approved":True}),box.deleteLater()));self.log_layout.insertWidget(max(0,self.log_layout.count()-1),box)
+        box=QFrame();box.setStyleSheet("QFrame { background: #332a18; border: 1px solid #8a6a2d; border-radius: 12px; }");row=QHBoxLayout(box);text=QLabel(f"Permitir <b>{escape(tool)}</b><br>{escape(args)}");text.setWordWrap(True);deny=QPushButton("Negar");allow=QPushButton("Permitir");row.addWidget(text,1);row.addWidget(deny);row.addWidget(allow);deny.clicked.connect(lambda:(self._send({"action":"confirm","approved":False}),box.deleteLater()));allow.clicked.connect(lambda:(self._send({"action":"confirm","approved":True}),box.deleteLater()));self.log_layout.insertWidget(max(0,self.log_layout.count()-1),box)
     def closeEvent(self,event:Any)->None:
         if self._closing:event.accept();return
         self._closing=True;self._timer.stop()
