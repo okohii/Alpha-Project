@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 from app.assistant.entities import SITE_MARKERS
 from app.security.permissions import SecurityLevel
 from app.skills.registry import SkillRegistry
 
-# Intents que respondem direto (sem LLM e sem tools/planejamento):
-# cumprimentos, despedidas, perguntas e informações diretas.
 DIRECT_INTENTS = frozenset(
     {"greeting", "thanks", "farewell", "direct_question", "direct_info"}
 )
@@ -40,12 +39,7 @@ class Request:
 
 @dataclass(slots=True)
 class Intent:
-    """Representação INTERNA estruturada — nunca linguagem natural livre.
-
-    O Facilitator raciocina sobre este objeto; o Agent executa. ``risk_level``
-    é INFORMATIVO (sugestão): quem decide segurança é o gate de permissões do
-    AgentCore, nunca o Facilitator.
-    """
+    """Representação interna estruturada para a etapa de compreensão."""
 
     name: str
     entities: dict[str, str] = field(default_factory=dict)
@@ -57,11 +51,6 @@ class Intent:
     direct_response: str | None = None
 
     def copy_base(self) -> Intent:
-        """Cópia rasa para continuação (resposta a esclarecimento pendente).
-
-        Preserva nome/risco/skill, zera entidades: elas são re-extraídas da
-        resposta do usuário.
-        """
         return Intent(
             name=self.name,
             confidence=max(self.confidence, 0.9),
@@ -84,16 +73,23 @@ class Intent:
 
 @dataclass(slots=True)
 class Task:
-    """Etapa de execução derivada do Goal — dica de tool/skill + entidades."""
+    """Etapa de execução derivada do Goal — hint + entidades + permissão."""
 
     tool_hint: str
     entities: dict[str, str] = field(default_factory=dict)
     required_permission: str = "read"
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tool_hint": self.tool_hint,
+            "entities": dict(self.entities),
+            "required_permission": self.required_permission,
+        }
+
 
 @dataclass(slots=True)
 class Goal:
-    """Plano estruturado a ser entregue ao Agent (camada EXECUTA)."""
+    """Objetivo estruturado entregue à camada de planejamento/execução."""
 
     intent: Intent
     tasks: list[Task] = field(default_factory=list)
@@ -101,11 +97,13 @@ class Goal:
     priority: str = "normal"
     state: str = "pending"
     expected_result: str | None = None
+    id: str = field(default_factory=lambda: f"goal-{uuid4().hex[:12]}")
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "id": self.id,
             "intent": self.intent.to_dict(),
-            "tasks": [task.__dict__ for task in self.tasks],
+            "tasks": [task.to_dict() for task in self.tasks],
             "original_text": self.original_text,
             "priority": self.priority,
             "state": self.state,
@@ -121,11 +119,7 @@ _RISK_BY_SKILL: dict[str, SecurityLevel] = {
 
 
 class IntentDetector:
-    """Detecta o Intent determinístico, reutilizando o SkillRegistry.
-
-    NÃO executa tools e NÃO decide segurança: apenas classifica e sugere
-    (``suggested_skill``, ``risk_level``).
-    """
+    """Detecta Intent determinístico sem executar tools ou decidir segurança."""
 
     def __init__(self, skill_registry: SkillRegistry | None = None) -> None:
         self.skill_registry = skill_registry
@@ -133,15 +127,13 @@ class IntentDetector:
     def detect(self, request: Request) -> Intent:
         text = request.text.strip()
         lowered = text.lower()
-
         directive = self._detect_direct(lowered)
         if directive is not None:
             return directive
 
         intent_name, score, skill_name = self._detect_via_skill(text)
-        confidence = IntentDetector._confidence(score)
+        confidence = self._confidence(score)
         if skill_name is not None and self._is_weak_selection(text):
-            # Empate fraco entre skills (ou abaixo do piso) = baixa confiança.
             confidence = 0.2
         return Intent(
             name=intent_name,
@@ -153,9 +145,7 @@ class IntentDetector:
     def _detect_direct(self, lowered: str) -> Intent | None:
         if _matches_any(lowered, _OUI_SIMPLE):
             return Intent(
-                name="greeting",
-                confidence=0.99,
-                direct_response="Oi! No que posso ajudar?",
+                name="greeting", confidence=0.99, direct_response="Oi! No que posso ajudar?"
             )
         if _matches_any(lowered, _THANK_SIMPLE):
             return Intent(
@@ -164,11 +154,7 @@ class IntentDetector:
                 direct_response="De nada! Sempre que precisar, é só chamar.",
             )
         if _matches_any(lowered, _FAREWELL_SIMPLE):
-            return Intent(
-                name="farewell",
-                confidence=0.99,
-                direct_response="Até logo!",
-            )
+            return Intent(name="farewell", confidence=0.99, direct_response="Até logo!")
         if any(q in lowered for q in _QUESTION_SIMPLE):
             return Intent(name="direct_question", confidence=0.9)
         if _is_direct_info(lowered):
@@ -187,19 +173,12 @@ class IntentDetector:
 
     @staticmethod
     def _confidence(score: int) -> float:
-        # Normaliza a pontuação bruta de keywords (soma de hits) para 0..1.
         return round(min(1.0, 0.45 + score * 0.18), 2)
 
     def _is_weak_selection(self, text: str) -> bool:
-        """Empate fraco no piso / abaixo do piso -> fallback seguro de baixa confiança.
-
-        Reusa a mesma regra determinística do ``SkillRegistry`` (sem duplicar
-        heurística): ``select_skills_for_task`` devolve [] justamente nesses casos.
-        """
         if self.skill_registry is None:
             return False
-        selected = self.skill_registry.select_skills_for_task(text, 1)
-        return not selected
+        return not self.skill_registry.select_skills_for_task(text, 1)
 
 
 def _intent_for_skill(skill: str, text: str) -> str:
@@ -207,23 +186,21 @@ def _intent_for_skill(skill: str, text: str) -> str:
     if skill == "web":
         return "web_search"
     if skill == "browser":
-        if any(site in lowered for site in SITE_MARKERS):
-            return "browser_navigate"
-        return "browser_web"
+        return "browser_navigate" if any(site in lowered for site in SITE_MARKERS) else "browser_web"
     if skill == "files":
-        if any(token in lowered for token in ("ler", "leia", "mostrar", "mostre", "abrir arquivo")):
-            return "file_read"
-        return "file_access"
+        return "file_read" if any(
+            token in lowered for token in ("ler", "leia", "mostrar", "mostre", "abrir arquivo")
+        ) else "file_access"
     if skill == "documents":
         return "document_search"
     if skill == "computer":
-        if any(token in lowered for token in ("clicar", "clique", "teclado", "digit", "mouse")):
-            return "gui_action"
-        return "app_open"
+        return "gui_action" if any(
+            token in lowered for token in ("clicar", "clique", "teclado", "digit", "mouse")
+        ) else "app_open"
     if skill == "memory":
-        if any(token in lowered for token in ("esqueç", "esque", "apague", "remova")):
-            return "memory_delete"
-        return "memory_save"
+        return "memory_delete" if any(
+            token in lowered for token in ("esqueç", "esque", "apague", "remova")
+        ) else "memory_save"
     if skill == "macros":
         return "macro_execute"
     if skill == "shell":
