@@ -63,6 +63,15 @@ class InteractionManager:
             return InteractionDecision(False, reason="wake_word_missing")
         self.active = True
         self.last_activity = time.monotonic()
+        command = (command or "").strip(" .,!?;:\n\t")
+        if not command:
+            return InteractionDecision(
+                False,
+                activated=True,
+                command="",
+                wake_word=find_wake_word(raw, self._wake_words),
+                reason="wake_word_only",
+            )
         return InteractionDecision(True, activated=True, command=command,
                                   wake_word=find_wake_word(raw, self._wake_words), reason="wake_word")
 
