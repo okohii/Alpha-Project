@@ -64,6 +64,7 @@ class NativeAlphaWindow(QWidget):
         self.mode = mode; self.incoming: Queue[dict[str, Any]] = Queue(); self.ws = _WebSocketThread(ws_url, self.incoming)
         self.conversation_id = None; self._drag_origin = None; self._closing = False; self._chat_history: list[tuple[str,str]] = []
         self._startup_done = False; self._avatar_visible = mode != "avatar"; self._execution_timer = QTimer(self); self._execution_timer.setSingleShot(True); self._execution_timer.timeout.connect(self._clear_execution)
+        self._confirmation_box: QFrame | None = None
         settings = get_settings(); self._avatar_size = max(220, int(settings.avatar_size)); self._screen_mode = settings.avatar_screen_mode; self._screen_index = int(settings.avatar_screen_index); self._margin = max(8, int(settings.avatar_margin))
         self.setWindowTitle("ALPHA"); self.resize(width if mode == "chat" else self._avatar_size, height if mode == "chat" else self._avatar_size); self.setMinimumSize(420,520) if mode == "chat" else self.setMinimumSize(self._avatar_size, self._avatar_size)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
@@ -155,7 +156,7 @@ class NativeAlphaWindow(QWidget):
     def _position_on_target_screen(self)->None:
         screen=self._target_screen()
         if screen is None:return
-        geo=screen.availableGeometry(); self.move(geo.right()-self.width()-self._margin+1, geo.bottom()-self.height()-self._margin+1)
+        geo=screen.availableGeometry(); self.move(geo.left()+self._margin, geo.top()+self._margin)
 
     def _drain_events(self)->None:
         processed=0
@@ -179,7 +180,7 @@ class NativeAlphaWindow(QWidget):
             elif kind=="confirmation":
                 tool=message.get("tool","ação"); args=message.get("arguments","")
                 if self.mode=="chat": self.activity.setText(f"Confirmação: {tool} {args}".strip()); self._append_confirmation(tool,args)
-                else: self._update_avatar_hud("verifying",f"Confirmação: {tool}")
+                else: self._show_avatar_confirmation(tool,args)
             elif kind=="done":
                 self.conversation_id=message.get("conversation_id") or self.conversation_id
                 if self.mode=="chat": self._set_state("idle")
@@ -193,6 +194,21 @@ class NativeAlphaWindow(QWidget):
             elif kind=="connection_error":
                 if self.mode=="chat": self.activity.setText("Conectando ao ALPHA Core…")
                 else: self._update_avatar_hud("error","Conectando ao ALPHA Core…")
+
+    def _show_avatar_confirmation(self,tool:str,args:str)->None:
+        if self.mode!="avatar":return
+        if self._confirmation_box is not None:
+            self._confirmation_box.deleteLater(); self._confirmation_box=None
+        box=QFrame(self); box.setObjectName("avatarConfirmation"); box.setStyleSheet("QFrame#avatarConfirmation{background:#0b1020;border:2px solid #ffb35c;border-radius:14px;} QLabel{background:transparent;color:#f5fbff;font-size:10px;font-weight:600;} QPushButton{background:#18233a;color:#ffffff;border:1px solid #5f7690;border-radius:8px;padding:5px 9px;font-size:10px;font-weight:700;} QPushButton:hover{background:#243653;} QPushButton#allow{background:#6b4a16;border-color:#ffc15f;} QPushButton#allow:hover{background:#8a611d;}")
+        box.setGeometry(6, max(6,self.height()-112), self.width()-12, 106); layout=QVBoxLayout(box); layout.setContentsMargins(9,7,9,7); layout.setSpacing(5)
+        label=QLabel(f"Permitir: {escape(tool)}\n{escape(args)[:100]}",box); label.setWordWrap(True); layout.addWidget(label,1)
+        row=QHBoxLayout(); row.setSpacing(6); deny=QPushButton("Negar",box); allow=QPushButton("Permitir",box); allow.setObjectName("allow"); row.addWidget(deny,1); row.addWidget(allow,1); layout.addLayout(row)
+        deny.clicked.connect(lambda:self._resolve_avatar_confirmation(False,box)); allow.clicked.connect(lambda:self._resolve_avatar_confirmation(True,box)); box.show(); box.raise_(); self._confirmation_box=box; self._update_avatar_hud("verifying","Aguardando permissão…")
+
+    def _resolve_avatar_confirmation(self,approved:bool,box:QFrame)->None:
+        self._send({"action":"confirm","approved":approved})
+        if self._confirmation_box is box:self._confirmation_box=None
+        box.deleteLater(); self._update_avatar_hud("listening","Pronto")
 
     def _append_confirmation(self,tool:str,args:str)->None:
         box=QFrame(); box.setStyleSheet("QFrame{background:#332a18;border:1px solid #8a6a2d;border-radius:12px;}"); row=QHBoxLayout(box); text=QLabel(f"Permitir <b>{escape(tool)}</b><br>{escape(args)}"); text.setWordWrap(True); deny=QPushButton("Negar"); allow=QPushButton("Permitir"); row.addWidget(text,1); row.addWidget(deny); row.addWidget(allow); deny.clicked.connect(lambda:(self._send({"action":"confirm","approved":False}),box.deleteLater())); allow.clicked.connect(lambda:(self._send({"action":"confirm","approved":True}),box.deleteLater())); self.log_layout.insertWidget(max(0,self.log_layout.count()-1),box)
