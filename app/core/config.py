@@ -41,8 +41,6 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.6-flash"
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY", "API_KEY"))
 
-    # Gateway OpenAI-compatible opcional (ex.: 9Router). O gateway decide o
-    # provedor/modelo final; ALPHA não gerencia nem tenta contornar quotas.
     cloud_llm_enabled: bool = False
     cloud_llm_base_url: str = "http://127.0.0.1:20128/v1"
     cloud_llm_api_key: str = ""
@@ -52,9 +50,6 @@ class Settings(BaseSettings):
     llm_mode: Literal["local", "cloud", "auto", "hybrid"] = "local"
     allow_cloud_llm: bool = True
     allow_web: bool = True
-
-    # Roteamento determinístico: tarefas simples permanecem locais; sinais de
-    # execução multi-etapas/computador/web podem ir para o gateway em hybrid.
     hybrid_cloud_for_complex: bool = True
     hybrid_cloud_fallback: bool = True
 
@@ -90,6 +85,8 @@ class Settings(BaseSettings):
     tts_emotion_decay_seconds: float = 60.0
 
     memory_min_importance: float = 0.70
+    memory_working_max_items: int = 20
+    memory_working_max_contexts: int = 32
     rag_top_k: int = 5
     memory_relevance_min_score: float = 0.12
     agent_max_tool_iterations: int = 8
