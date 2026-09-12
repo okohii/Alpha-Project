@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
 
 from app.skills.base import Skill
+
+logger = logging.getLogger("app.skills.registry")
 
 
 class SkillNotFoundError(KeyError):
@@ -12,12 +15,24 @@ class SkillNotFoundError(KeyError):
 
 
 class SkillRegistry:
-    """Registra skills (grupos de ferramentas) e resolve a skill adequada para uma tarefa."""
+    """Registra skills (grupos de ferramentas) e resolve a skill adequada para uma tarefa.
+
+    Separa as fases:
+      1. **Descoberta** — ``discover_skills_for_task()`` encontra candidatas
+         amplas (keywords + resolvers custom).
+      2. **Seleção** — ``select_skills_for_task()`` filtra por confiança e
+         desempate, devolvendo apenas as que realmente devem ser expostas ao LLM.
+
+    Cada Skill define seus próprios ``keywords`` — a lista não é mais
+    hardcodada neste módulo.
+    """
 
     def __init__(self) -> None:
         self._skills: dict[str, Skill] = {}
         self._resolvers: list[Callable[[str], str | None]] = []
         self._tool_to_skill: dict[str, str] = {}
+
+    # ── cadastro ────────────────────────────────────────────────────────
 
     def register(self, skill: Skill) -> None:
         self._skills[skill.name.lower()] = skill
@@ -43,16 +58,39 @@ class SkillRegistry:
     def add_resolver(self, resolver: Callable[[str], str | None]) -> None:
         self._resolvers.append(resolver)
 
+    # ── validação ───────────────────────────────────────────────────────
+
+    def validate_tools(self, available_tools: dict[str, Any]) -> list[str]:
+        """Verifica se todas as tools referenciadas pelas skills existem.
+
+        Retorna lista de nomes de tools ausentes (vazia = tudo ok).
+        """
+        missing: list[str] = []
+        for skill in self._skills.values():
+            for tool_name in skill.tools:
+                if tool_name not in available_tools:
+                    missing.append(f"{skill.name} → {tool_name}")
+        return missing
+
+    # ── descoberta ──────────────────────────────────────────────────────
+
+    def discover_skills_for_task(self, task_description: str) -> list[Skill]:
+        """Encontra TODAS as skills potencialmente relevantes (fase ampla).
+
+        Combina resolvers custom e keywords da própria skill.
+        Retorna todas as que pontuaram ≥ 1, sem filtro de confiança.
+        """
+        ranked = self.rank_skills_for_task(task_description)
+        return [skill for skill, score in ranked if score >= 1]
+
+    # ── seleção ─────────────────────────────────────────────────────────
+
     def find_for_task(self, task_description: str) -> Skill | None:
         matches = self.skills_for_task(task_description)
         return matches[0] if matches else None
 
     def skills_for_task(self, task_description: str) -> list[Skill]:
-        """Retorna TODAS as skills cujas palavras-chave casam, por relevância.
-
-        A ordem é decrescente de pontuação: skills com mais keywords na
-        descrição vêm primeiro (resolvers custom têm prioridade em empates).
-        """
+        """Retorna TODAS as skills cujas keywords casam, por relevância."""
         return [skill for skill, _ in self.rank_skills_for_task(task_description)]
 
     def rank_skills_for_task(self, task_description: str) -> list[tuple[Skill, int]]:
@@ -68,7 +106,7 @@ class SkillRegistry:
             if match and match.lower() in self._skills:
                 scores[match.lower()] += 1
         for name, skill in self._skills.items():
-            hits = sum(1 for kw in _skill_keywords(skill) if kw in normalized)
+            hits = sum(1 for kw in skill.keywords if kw in normalized)
             if hits:
                 scores[name] += hits
         return sorted(
@@ -105,7 +143,7 @@ class SkillRegistry:
 
     def best_skill_for_task(self, task_description: str) -> Skill | None:
         """Retorna a skill com MAIS keywords casando (desambiguação).
-        
+
         Se houver empate entre skills, retorna None para sinalizar que o chamador
         deve usar ferramentas de TODAS as skills empatadas no topo.
         """
@@ -115,6 +153,8 @@ class SkillRegistry:
         top_score = ranked[0][1]
         top = [skill for skill, score in ranked if score == top_score]
         return top[0] if len(top) == 1 else None
+
+    # ── ferramentas ─────────────────────────────────────────────────────
 
     def skill_for_tool(self, tool_name: str) -> str | None:
         return self._tool_to_skill.get(tool_name)
@@ -132,50 +172,33 @@ class SkillRegistry:
                     tools.append(tool)
         return tools
 
+    # ── confiança ───────────────────────────────────────────────────────
+
+    def confidence_for_task(
+        self,
+        task_description: str,
+        min_confidence: int = 1,
+    ) -> str:
+        """Classifica a confiança da seleção de skills para a tarefa.
+
+        Retorna:
+          "alta"   – forte sinal (score ≥ 2) ou múltiplas skills com bom score;
+          "media"  – skill única com exatamente min_confidence;
+          "baixa"  – piso fraco (empate no score 1) ou nenhum sinal;
+          "nenhuma"– nenhum skill casou.
+        """
+        ranked = self.rank_skills_for_task(task_description)
+        if not ranked:
+            return "nenhuma"
+        top_score = ranked[0][1]
+        if top_score < min_confidence:
+            return "baixa"
+        matched = [skill for skill, score in ranked if score >= 1]
+        if len(matched) == 1 and top_score == min_confidence:
+            return "media"
+        if len(matched) > 1 and all(score == 1 for _, score in ranked):
+            return "baixa"
+        return "alta"
+
     def as_dict(self) -> dict[str, Any]:
         return {skill.name: list(skill.tools) for skill in self._skills.values()}
-
-
-def _skill_keywords(skill: Skill) -> list[str]:
-    keywords: dict[str, list[str]] = {
-        "browser": [
-            "navegador", "site", "url", "chrome", "edge", "firefox", "brave",
-            "github", "youtube", "youtu.be", "web", "página", "pagina",
-            "whatsapp", "web.whatsapp", "teams", "teams.microsoft", "teams.live",
-            "slack", "discord", "telegram", "instagram", "facebook", "twitter",
-            "x.com", "linkedin", "gmail", "outlook", "drive.google", "google drive",
-            "netflix", "prime video", "primevideo", "spotify", "twitch",
-            "vídeo", "videos", "assistir", "pesquisar no site", "pesquisar no google",
-        ],
-        "files": [
-            "arquivo", "pasta", "diretório", "diretorio",
-            "download", "documento", "abrir arquivo", "ler arquivo",
-        ],
-        "documents": ["indexar", "documento", "pesquisar documento", "buscar documento"],
-        "computer": [
-            "abrir aplicativo", "abrir programa", "abrir app", "fechar aplicativo",
-            "fechar programa", "janela", "monitor", "atalho", "instalado",
-            "clicar", "teclado", "mouse", "print", "screenshot", "digitar",
-            # Apps conhecidos que podem ser desktop OU web:
-            "whatsapp", "teams", "slack", "discord", "telegram", "zoom", "skype",
-        ],
-        "memory": [
-            "memória", "memoria", "lembrar", "lembra",
-            "preferência", "preferencia", "esquecer", "perfil",
-        ],
-        "web": [
-            "pesquisar", "pesquisa", "buscar na internet", "procurar", "procura",
-            "procure", "busque", "notícia", "noticia", "google", "web",
-            "vídeo", "videos", "assistir",
-        ],
-        "system": ["hora", "status", "sistema", "configuração", "configuracao", "tempo"],
-        "reminders": [
-            "lembrete", "lembrar", "lembra", "lembre",
-            " às 1", " daqui a", "todo dia", "daqui",
-            "agendar", "agenda",
-        ],
-        "calendar": ["agenda", "reunião", "reuniao", "compromisso", "evento"],
-        "tasks": ["tarefa", "executar", "rotina", "agendar tarefa"],
-        "shell": ["terminal", "comando de shell", "script", "código", "codigo"],
-    }
-    return keywords.get(skill.name.lower(), [skill.name.lower()])

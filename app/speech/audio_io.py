@@ -217,7 +217,7 @@ def record_microphone_vad(
 
     # Pre-ring buffer to capture the beginning of speech and avoid cutting it.
     # Holds approximately pre_roll_duration seconds of audio before speech is detected.
-    pre_roll_frames = max(1, int(pre_roll_duration / frame_duration))
+    pre_roll_frames = max(1, round(pre_roll_duration / frame_duration))
     pre_roll_buffer: list[np.ndarray] = []
 
     # Initialize WebRTC VAD if requested
@@ -249,8 +249,8 @@ def record_microphone_vad(
         speech_started = False
         confirming_frames = 0
         silent_frames = 0
-        silence_frames_needed = max(1, int(silence_pad / frame_duration))
-        speech_frames_min = max(1, int(min_speech_duration / frame_duration))
+        silence_frames_needed = max(1, round(silence_pad / frame_duration))
+        speech_frames_min = max(1, round(min_speech_duration / frame_duration))
         speech_confirmed = max(1, int(speech_confirm_frames))
         deadline = time.monotonic() + max_wait
         while True:
@@ -273,7 +273,7 @@ def record_microphone_vad(
                 ring_buffer_full = True
 
             if use_webrtc_vad and webrtc_vad is not None:
-                is_speech = _vad_webrtc(rms, sample_rate, webrtc_vad)
+                _vad_webrtc(rms, sample_rate, webrtc_vad)
             else:
                 if len(noise_samples) < 8:
                     noise_samples.append(rms)

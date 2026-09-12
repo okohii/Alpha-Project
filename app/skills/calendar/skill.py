@@ -5,6 +5,7 @@ from app.skills.base import Skill
 SKILL = Skill(
     name="Calendar",
     description="Agenda: criar, listar e deletar eventos.",
+    keywords=["agenda", "reunião", "reuniao", "compromisso", "evento"],
     tools=[
         "calendar_create",
         "calendar_list",

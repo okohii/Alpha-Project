@@ -246,3 +246,53 @@ async def test_selection_does_not_add_llm_calls():
     # 1 chamada para o primeiro turno + 1 para o segundo (após tool). Nenhuma
     # chamada extra foi gasta com seleção.
     assert len(provider.calls) == 2
+
+
+def test_skill_selection_macros_only():
+    """'Quais macros estão configuradas?' -> Macros apenas."""
+    agent = _agent(_tools(), handler=lambda _: True)
+    skills = agent.skill_registry.select_skills_for_task("quais macros estão configuradas?")
+    assert [s.name for s in skills] == ["Macros"]
+    names = _names(agent, "quais macros estão configuradas?")
+    assert "macro_run" in names
+    assert "file_read" not in names
+    assert "browser_open" not in names
+    assert "web_search" not in names
+
+
+def test_skill_selection_memory_reminders_compound():
+    """'lembrar de comprar pão amanhã às 10' -> Memory + Reminders."""
+    agent = _agent(_tools(), handler=lambda _: True)
+    skills = agent.skill_registry.select_skills_for_task("lembrar de comprar pão amanhã às 10")
+    assert {s.name for s in skills} == {"Memory", "Reminders"}
+
+
+@pytest.mark.anyio
+async def test_unknown_tool_call_rejected():
+    """Modelo chama tool inexistente → mensagem de erro com alternativas."""
+    from app.llm.base import ToolCall as RealToolCall
+
+    agent = _agent(_tools(), handler=lambda _: True)
+    permissions = agent._permissions_for_turn()
+    allowed = {"time", "file_read", "file_search"}
+    tool_call = RealToolCall(name="nope_tool", arguments={"q": 1})
+    result_msg, evidence = await agent._execute_tool(
+        tool_call, permissions, None, allowed
+    )
+    assert evidence is None
+    assert "nope_tool" in result_msg.content
+    assert "Use apenas" in result_msg.content
+
+
+def test_schemas_for_only_returns_advertised():
+    """_schemas_for never returns tools outside the provided name set."""
+    agent = _agent(_tools(), handler=lambda _: True)
+    all_names = {"browser_open", "browser_text", "browser_js"}
+    schemas = agent._schemas_for(all_names, agent._permissions_for_turn())
+    names_in_schemas = {s["function"]["name"] for s in schemas}
+    assert "browser_open" in names_in_schemas
+    assert "browser_js" in names_in_schemas
+    assert names_in_schemas <= all_names
+    # Nenhum nome fora do conjunto jamais vira schema.
+    assert "web_search" not in names_in_schemas
+    assert "macro_run" not in names_in_schemas

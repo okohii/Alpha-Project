@@ -13,7 +13,7 @@ def test_event_bus_voice_events_exist():
     ]
     for event_type in voice_events:
         assert event_type.value is not None
-        assert isinstance(event_type, EventType.EventType)
+        assert isinstance(event_type, EventType)
 
 
 def test_emit_assistant_listening():

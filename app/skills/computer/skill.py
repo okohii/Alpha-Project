@@ -5,6 +5,12 @@ from app.skills.base import Skill
 SKILL = Skill(
     name="Computer",
     description="Automação do computador: apps, janelas, teclado, mouse, tela e UI.",
+    keywords=[
+        "abrir aplicativo", "abrir programa", "abrir app", "fechar aplicativo",
+        "fechar programa", "janela", "monitor", "atalho", "instalado",
+        "clicar", "teclado", "mouse", "print", "screenshot", "digitar",
+        "whatsapp", "teams", "slack", "discord", "telegram", "zoom", "skype",
+    ],
     tools=[
         "open_app",
         "close_app",

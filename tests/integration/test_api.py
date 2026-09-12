@@ -145,7 +145,7 @@ async def test_chat_memory_and_documents_endpoints(monkeypatch):
     monkeypatch.setattr("app.runtime.application.MemoryService", FakeMemoryService)
     monkeypatch.setattr(
         "app.runtime.application.build_default_tool_registry",
-        lambda file_manager=None, task_service=None: object(),
+        lambda file_manager=None, task_service=None, **kwargs: object(),
     )
     monkeypatch.setattr("app.api.routes_documents.DocumentIndexer", FakeDocumentIndexer)
     monkeypatch.setattr("app.api.routes_documents.DocumentRepository", lambda session: object())

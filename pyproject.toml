@@ -21,7 +21,7 @@ dependencies = [
   "pgvector>=0.3,<1.0",
   "python-multipart>=0.0.9,<1.0",
   "faster-whisper>=1.0.3,<2.0",
-  "piper-tts>=1.2.0,<2.0",
+  "kokoro>=0.9.4,<1.0",
   "sounddevice>=0.4.6,<1.0",
   "numpy>=1.26,<3.0",
   "pypdf>=5.0,<6.0",
@@ -39,6 +39,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff>=0.6,<1.0"]
+desktop = ["pywebview>=5.0,<7.0"]
 
 [project.scripts]
 alpha = "app.cli:main"

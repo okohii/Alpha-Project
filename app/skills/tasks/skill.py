@@ -5,6 +5,7 @@ from app.skills.base import Skill
 SKILL = Skill(
     name="Tasks",
     description="Tarefas persistentes do executor automático.",
+    keywords=["tarefa", "executar", "rotina", "agendar tarefa"],
     tools=[
         "task_create",
         "task_execute",

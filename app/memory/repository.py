@@ -108,6 +108,7 @@ class MemoryRepository:
         embedding: Sequence[float],
         limit: int = 5,
         keyword: str | None = None,
+        min_score: float = 0.0,
     ) -> list[MemoryModel]:
         """Busca memórias relevantes combinando vetor e léxico.
 
@@ -115,6 +116,9 @@ class MemoryRepository:
         nota híbrida (cosseno do embedding + sobreposição de tokens). Isso evita
         devolver as N memórias mais recentes quando não têm relação com a
         consulta — causa de contexto alucinado do modelo.
+
+        ``min_score`` corta candidatos irrelevantes (>= 0): memória que fica
+        abaixo do limiar NÃO vira contexto do agente.
         """
         query = (keyword or "").strip()
         try:
@@ -126,14 +130,15 @@ class MemoryRepository:
             self.logger.debug("DB search error, returning empty: %s", exc)
             return []
 
-        ranked = sorted(
-            candidates,
-            key=lambda memory: hybrid_score(
-                query,
-                memory.content,
-                embedding,
-                memory.embedding,
+        scored = sorted(
+            (
+                (memory, hybrid_score(query, memory.content, embedding, memory.embedding))
+                for memory in candidates
             ),
+            key=lambda pair: pair[1],
             reverse=True,
         )
-        return ranked[:limit]
+        relevant = [
+            memory for memory, score in scored if score >= min_score
+        ]
+        return relevant[:limit]

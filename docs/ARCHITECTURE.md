@@ -16,6 +16,7 @@ Mapa dos módulos de `app/` e princípios que guiam a estrutura.
 | --- | --- | --- |
 | `app/agent/` | Núcleo do agente | `AgentCore` (`agent.py`), `FastPathRouter` (`router.py`, intenções regex sem LLM), `Task`/`TaskEngine` (`task.py`, `state.py`) |
 | `app/api/` | REST FastAPI | rotas: chat, health, conversations, documents, memory, tasks |
+| `app/avatar/` | Reflexo visual do sistema | `AvatarState`/`state_for_event` (`state.py`), `AnimationMapping` (`mapping.py`), `AvatarController` (`controller.py`, assinante do EventBus), `AvatarRenderer`/`NullRenderer` (`renderer.py`); renderers Live2D/2D/3D são substituíveis via `AvatarCommand`. Janela overlay transparente/sem moldura (`desktop.py`) + sessão de voz contínua com mic ligado (`server.py`, WS + voice loop)` |
 | `app/calendar/` | Agenda | service + modelos |
 | `app/cli/` | Interface `alpha` | `app.py` (main), `renderer.py`, `commands.py` (slash), `events.py` (render handlers), `panels.py`, `themes.py` (Verbosity); entry point `app.cli:main` e `python -m app.cli` |
 | `app/core/` | Infra transversal | `config.py` (Settings), `events.py` (EventBus), `logging.py` |

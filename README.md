@@ -15,6 +15,7 @@ O MVP inclui:
 - Sistema de documentos e indexação básica
 - Pipeline de voz com STT/TTS abstratos
 - **CLI terminal-first** (`alpha`): interface principal, com Rich, slash commands, streaming e eventos em tempo real
+- **Overlay Desktop** (`alpha overlay`): janela nativa sobre o Alpha Core, consumindo eventos do `EventBus`
 - Testes automatizados em pytest
 
 ## Requisitos
@@ -47,6 +48,7 @@ ALPHA/
 │   ├── documents/
 │   ├── llm/          # base + provedores (Gemini, Ollama, mock) + router/fallback
 │   ├── memory/
+│   ├── overlay/      # Overlay Desktop (state, server/WS, UI) — interface sobre o Core
 │   ├── perception/   # stt, wakeword, vision
 │   ├── reminders/
 │   ├── runtime/      # build_agent (application) + AgentContext (session)
@@ -259,6 +261,34 @@ python -m app.cli --help          # alternativa sem entry point instalado
 ```
 
 > Em PowerShell, aspas duplas embutidas em JSON podem ser removidas ao passar para programas nativos. Prefira usar um script Python com `sys.argv` ou arquivos temporários.
+
+### Overlay Desktop (janela do ALPHA)
+
+O overlay é uma interface visual sobre o **Alpha Core** — não é outro agente: apenas consome os eventos do `EventBus` e reflete estados/falas, sem duplicar lógica ou regras de segurança (permissões continuam exclusivas do `AgentCore`).
+
+```powershell
+# janela nativa (pywebview) — instale o extra uma vez
+.\.venv\Scripts\python -m pip install -e ".[desktop]"
+alpha overlay
+
+# sem pywebview: abre no navegador padrão
+alpha overlay --browser
+```
+
+Endpoints do overlay (montados no app FastAPI em `/overlay`):
+
+- `GET /overlay/` — interface (index.html + assets em `/overlay/ui/`)
+- `WS /overlay/ws` — protocolo: `chat`/`chat_stream`, `voice` (áudio base64), `cancel`, `confirm`
+- `GET /overlay/health` — status do serviço do overlay
+
+Para desenvolvimento, basta rodar o backend e abrir a UI:
+
+```powershell
+.\.venv\Scripts\python -m uvicorn app.main:app --port 18080
+# depois acesse http://127.0.0.1:18080/overlay/
+```
+
+Estados exibidos: `idle`, `listening`, `thinking`, `planning`, `executing`, `verifying`, `speaking`, `error`. O overlay está preparado para integrar um avatar no futuro e funciona sem ele.
 
 ## 4) Executar o backend de diferentes formas
 

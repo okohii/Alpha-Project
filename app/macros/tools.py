@@ -137,7 +137,7 @@ class MacroCreateTool(Tool):
     )
     permission = ToolPermission.sensitive
 
-async def execute(self, **kwargs: Any) -> ToolResult:
+    async def execute(self, **kwargs: Any) -> ToolResult:
         name = str(kwargs.get("name", ""))
         description = str(kwargs.get("description", "") or "") or None
         parameters = kwargs.get("parameters", [])

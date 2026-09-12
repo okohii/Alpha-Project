@@ -31,11 +31,17 @@ class EventType(StrEnum):
     # percepção
     perception_started = "perception_started"
     perception_completed = "perception_completed"
+    # verificação
+    verification_started = "verification_started"
+    verification_completed = "verification_completed"
     # fluxo / confirmação
     waiting_confirmation = "waiting_confirmation"
     waiting_confirmation_end = "waiting_confirmation_end"
     waiting_input = "waiting_input"
     permission_decision = "permission_decision"
+    # honestidade / integridade da resposta final
+    honesty_gate = "honesty_gate"
+    textual_tool_call_blocked = "textual_tool_call_blocked"
     # tarefa
     task_created = "task_created"
     task_step_completed = "task_step_completed"

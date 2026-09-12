@@ -46,6 +46,9 @@ class FakeVoicePipeline:
         self.speak_calls.append(text)
         return {"status": "ok", "audio_path": str(Path("C:/tmp/fake-speech.wav"))}
 
+    async def speak_expressive(self, text: str, *args, **kwargs):
+        return await self.speak(text)
+
     async def process(self, audio_path):
         return {"transcription": "olá do microfone", "language": "pt", "segments": []}
 

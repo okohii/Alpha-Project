@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -145,11 +146,22 @@ class MemoryService:
         ]
         return profile[:limit]
 
-    async def search_memories(self, query: str, limit: int = 5) -> list[MemoryItem]:
+    async def search_memories(
+        self, query: str, limit: int = 5, min_score: float = 0.0
+    ) -> list[MemoryItem]:
         embedding = await self.embedding_provider.embed(query)
-        memories = await self.repository.search_by_embedding(
-            embedding, limit=limit, keyword=query
-        )
+        try:
+            parameters = inspect.signature(self.repository.search_by_embedding).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "min_score" in parameters:
+            memories = await self.repository.search_by_embedding(
+                embedding, limit=limit, keyword=query, min_score=min_score
+            )
+        else:
+            memories = await self.repository.search_by_embedding(
+                embedding, limit=limit, keyword=query
+            )
         return [self._to_item(memory) for memory in memories]
 
     async def delete_memory(self, memory_id: str) -> None:

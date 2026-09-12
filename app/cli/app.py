@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import shutil
+import signal
 import sys
 import threading
 from datetime import UTC, datetime
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from app.agent.agent import AgentCore
+from app.avatar.desktop import DEFAULT_HOST as AVATAR_DEFAULT_HOST
+from app.avatar.desktop import DEFAULT_PORT as AVATAR_DEFAULT_PORT
 from app.cli.commands import SlashContext, VerbosityHolder, run_slash
 from app.cli.renderer import TerminalRenderer
 from app.cli.themes import Verbosity
@@ -263,6 +266,57 @@ def _build_parser() -> argparse.ArgumentParser:
         "--params", default=None, help='JSON com parâmetros: \'{"message":"Oi"}\''
     )
 
+    overlay = subparsers.add_parser(
+        "overlay",
+        parents=[common],
+        help="abre o Overlay Desktop do ALPHA (janela nativa sobre o Alpha Core)",
+    )
+    overlay.add_argument(
+        "--host",
+        default=None,
+        help=f"endereço do backend (padrão: {get_settings().overlay_host})",
+    )
+    overlay.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help=f"porta do backend (padrão: {get_settings().overlay_port})",
+    )
+    overlay.add_argument(
+        "--browser",
+        action="store_true",
+        help="abre no navegador em vez de janela nativa",
+    )
+
+    avatar = subparsers.add_parser(
+        "avatar",
+        parents=[common],
+        help=(
+            "abre o Avatar Overlay do ALPHA: janela transparente (tipo PNG), "
+            "sem moldura, com o microfone ligado (modo voz contínuo)"
+        ),
+    )
+    avatar.add_argument(
+        "--host",
+        default=None,
+        help=f"endereço do backend (padrão: {AVATAR_DEFAULT_HOST})",
+    )
+    avatar.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help=f"porta do backend (padrão: {AVATAR_DEFAULT_PORT})",
+    )
+    avatar.add_argument("--width", type=int, default=None, help="largura da janela")
+    avatar.add_argument("--height", type=int, default=None, help="altura da janela")
+    avatar.add_argument(
+        "--no-transparent",
+        dest="transparent",
+        action="store_false",
+        default=True,
+        help="abre janela opaca (fallback de compatibilidade)",
+    )
+
     calendar = subparsers.add_parser(
         "calendar",
         parents=[common],
@@ -394,8 +448,13 @@ def _voice_mode(args: argparse.Namespace) -> bool:
     return settings.stt_enabled and settings.tts_enabled
 
 
-async def _speak_reply(pipeline: VoicePipeline, text: str) -> None:
-    result = await pipeline.speak(clean_markdown_artifacts(text))
+async def _speak_reply(pipeline: VoicePipeline, text: str, emotion: dict | None = None) -> None:
+    from app.speech.emotion import EmotionState
+
+    result = await pipeline.speak_expressive(
+        clean_markdown_artifacts(text),
+        emotion=EmotionState.from_dict(emotion) if emotion else None,
+    )
     if result.get("status") == "ok":
         await asyncio.to_thread(audio_io.play_wav, Path(result["audio_path"]))
     else:
@@ -466,7 +525,7 @@ async def _chat_once(
             if result.get("memory_created"):
                 print("[memória criada]")
         if voice_enabled:
-            await _speak_reply(VoicePipeline(), response_text)
+            await _speak_reply(VoicePipeline(), response_text, emotion=result.get("emotion"))
     return 0
 
 
@@ -499,14 +558,21 @@ async def _capture_speech_onset(
     return text
 
 
-async def _speak_interruptible(pipeline: VoicePipeline, text: str) -> str | None:
+async def _speak_interruptible(
+    pipeline: VoicePipeline, text: str, emotion: dict | None = None
+) -> str | None:
     """Fala a resposta; interrompe a reprodução assim que o usuário começa a falar.
 
     O gravador é iniciado durante a reprodução, então seu limiar de ruído é
     calibrado no eco do próprio áudio — apenas a voz do usuário (mais alta no
     microfone) dispara a interrupção.
     """
-    result = await pipeline.speak(clean_markdown_artifacts(text))
+    from app.speech.emotion import EmotionState
+
+    result = await pipeline.speak_expressive(
+        clean_markdown_artifacts(text),
+        emotion=EmotionState.from_dict(emotion) if emotion else None,
+    )
     if result.get("status") != "ok":
         print(f"[tts indisponível] {result.get('detail')}", file=sys.stderr)
         return None
@@ -580,7 +646,9 @@ async def _chat_voice_interactive(
         if result.get("memory_created") and not as_json:
             print("[memória criada]")
         if result["response"]:
-            barge = await _speak_interruptible(pipeline, result["response"])
+            barge = await _speak_interruptible(
+                pipeline, result["response"], emotion=result.get("emotion")
+            )
             if barge:
                 carry = barge
         else:
@@ -655,7 +723,9 @@ async def _chat_wake_interactive(
         if result.get("memory_created") and not as_json:
             print("[memória criada]")
         if result["response"]:
-            barge = await _speak_interruptible(pipeline, result["response"])
+            barge = await _speak_interruptible(
+                pipeline, result["response"], emotion=result.get("emotion")
+            )
             if barge:
                 carry = barge
                 if not _is_exit(carry):
@@ -669,7 +739,11 @@ async def _chat_wake_interactive(
                     _print_agent_tools(agent)
                     print(f"ALPHA: {clean_markdown_artifacts(result2['response'])}")
                     if result2["response"]:
-                        await _speak_interruptible(pipeline, result2["response"])
+                        await _speak_interruptible(
+                            pipeline,
+                            result2["response"],
+                            emotion=result2.get("emotion"),
+                        )
 
 
 async def _chat_interactive(
@@ -693,12 +767,12 @@ async def _start_scheduler_or_none():
     settings = get_settings()
     if not settings.scheduler_enabled:
         return None
-    
+
     def on_notify(message: str) -> None:
         play_notification_sound()
         show_notification("ALPHA - Lembrete", message)
         print(f"\n[lembrete] {message}\n", flush=True)
-    
+
     runner = SchedulerRunner(
         AsyncSessionLocal,
         interval_seconds=settings.scheduler_interval_seconds,
@@ -708,6 +782,7 @@ async def _start_scheduler_or_none():
     # Garante que os agendamentos de macros também disparem enquanto o chat
     # estiver aberto (mesmo sem interação do usuário).
     from app.macros.service import macro_service
+
     try:
         await macro_service.start_scheduler()
     except Exception as exc:  # noqa: BLE001
@@ -1315,6 +1390,43 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     configure_logging()
+
+    # Overlay/Avatar rodam em GUI blockante: o pywebview exige a thread
+    # principal (não pode ser despachado via asyncio.to_thread).
+    def _stop(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _stop)
+    if getattr(args, "command", None) == "overlay":
+        from app.overlay.desktop import main as overlay_main
+
+        try:
+            return overlay_main(
+                [
+                    *(["--host", args.host] if args.host else []),
+                    *(["--port", str(args.port)] if args.port else []),
+                    *(["--browser"] if args.browser else []),
+                ]
+            )
+        except KeyboardInterrupt:
+            print()
+            return 130
+    if getattr(args, "command", None) == "avatar":
+        from app.avatar.desktop import main as avatar_main
+
+        try:
+            return avatar_main(
+                [
+                    *(["--host", args.host] if args.host else []),
+                    *(["--port", str(args.port)] if args.port else []),
+                    *(["--width", str(args.width)] if args.width else []),
+                    *(["--height", str(args.height)] if args.height else []),
+                    *([] if args.transparent else ["--no-transparent"]),
+                ]
+            )
+        except KeyboardInterrupt:
+            print()
+            return 130
     try:
         return asyncio.run(_dispatch(args, parser))
     except KeyboardInterrupt:

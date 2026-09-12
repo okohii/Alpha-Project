@@ -67,8 +67,18 @@ class Settings(BaseSettings):
     tts_voice: str = ""
     tts_speed: float = 1.0
 
+    # Camada de expressividade vocal (emoção determinística sobre o Kokoro).
+    tts_emotion_enabled: bool = True
+    tts_default_emotion: str = "neutral"
+    tts_emotion_max_intensity: float = 1.0
+    tts_emotion_decay_seconds: float = 60.0
+
     memory_min_importance: float = 0.70
     rag_top_k: int = 5
+    # Relevância mínima (score híbrido embedding+lexical, 0..1) para uma memória
+    # virar contexto operacional do agente. Abaixo disso, memória não entra:
+    # evita que registros irrelevantes contaminem a resposta com ações/sugestões.
+    memory_relevance_min_score: float = 0.12
     agent_max_tool_iterations: int = 8
     # Timeout por execução de ferramenta: evita que uma tool travada
     # segure o turno do agente indefinidamente.
@@ -113,6 +123,10 @@ class Settings(BaseSettings):
     web_timeout_seconds: float = 10.0
 
     use_sqlite_for_tests: bool = False
+
+    # Overlay Desktop
+    overlay_host: str = "127.0.0.1"
+    overlay_port: int = 18080
 
     @property
     def allowed_directories(self) -> list[Path]:

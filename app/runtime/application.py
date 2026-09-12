@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from app.agent.agent import AgentCore
+from app.calendar.service import CalendarRepository, CalendarService
 from app.core.config import get_settings
 from app.llm.ollama import OllamaProvider
 from app.llm.router import LLMRouter
@@ -19,6 +21,8 @@ from app.skills.files.service import FileManager
 from app.skills.tasks import TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool
 from app.tasks.service import ManagedPathRepository, TaskExecutorService, TaskRepository
 from app.tools.registry import build_default_tool_registry
+
+logger = logging.getLogger("app.runtime.application")
 
 
 async def build_agent(
@@ -51,13 +55,36 @@ async def build_agent(
     reminder_service = ReminderService(ReminderRepository(session))
 
     try:
+        calendar_service = CalendarService(CalendarRepository(session))
+    except Exception:  # noqa: BLE001 - serviço opcional não derruba o agente
+        calendar_service = None
+
+    def _document_indexer_factory() -> Any:
+        from app.documents.indexer import DocumentIndexer, DocumentRepository
+
+        return DocumentIndexer(
+            file_manager=file_manager,
+            repository=DocumentRepository(session),
+            embedding_provider=LocalEmbeddingProvider(),
+        )
+
+    try:
         tool_registry = build_default_tool_registry(
             file_manager=file_manager,
+            memory_service=memory_service,
             task_service=task_service,
             reminder_service=reminder_service,
+            calendar_service=calendar_service,
+            document_indexer_factory=_document_indexer_factory,
         )
     except TypeError:
-        tool_registry = build_default_tool_registry(file_manager=file_manager)
+        tool_registry = build_default_tool_registry(
+            file_manager=file_manager,
+            memory_service=memory_service,
+            task_service=task_service,
+            reminder_service=reminder_service,
+            calendar_service=calendar_service,
+        )
 
     if hasattr(tool_registry, "tools"):
         for tool_class in (TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool):
@@ -66,6 +93,14 @@ async def build_agent(
     skill_registry = build_default_skill_registry(
         tools_in_registry=tool_registry.tools if hasattr(tool_registry, "tools") else None
     )
+    missing_tools = skill_registry.validate_tools(
+        tool_registry.tools if hasattr(tool_registry, "tools") else {}
+    )
+    if missing_tools:
+        logger.warning(
+            "skills com tools ausentes do registro (não serão expostas ao LLM): %s",
+            ", ".join(missing_tools),
+        )
 
     async def _permission_request(candidate: str) -> bool:
         """Handler único de confirmação de permissão.

@@ -223,7 +223,8 @@ class OllamaProvider:
                                 buffer.append(content)
                                 yield content
                             if message.get("tool_calls"):
-                                calls = parse_tool_calls(message["tool_calls"])
+                                incoming = parse_tool_calls(message["tool_calls"])
+                                calls = _merge_tool_calls(calls, incoming)
                             if line_data.get("done"):
                                 break
             except httpx.RequestError as exc:
@@ -241,6 +242,16 @@ def parse_tool_calls(items: list[dict[str, Any]]) -> list[ToolCall]:
         function = item.get("function", {})
         call_id = item.get("id") or function.get("id")
         args = function.get("arguments", {}) or {}
+        # Ollama (e o Qwen via Ollama) podem enviar `arguments` como JSON em
+        # texto; normaliza para dict para manter o ToolCall.parse estável.
+        if isinstance(args, str):
+            try:
+                parsed = json.loads(args)
+            except (TypeError, ValueError):
+                parsed = {"raw": args}
+            args = parsed if isinstance(parsed, dict) else {"raw": args}
+        if not isinstance(args, dict):
+            args = {"raw": args}
         if call_id:
             tool_calls.append(
                 ToolCall(id=call_id, name=function.get("name", ""), arguments=args)
@@ -250,3 +261,24 @@ def parse_tool_calls(items: list[dict[str, Any]]) -> list[ToolCall]:
                 ToolCall(name=function.get("name", ""), arguments=args)
             )
     return tool_calls
+
+
+def _merge_tool_calls(existing: list[ToolCall], incoming: list[ToolCall]) -> list[ToolCall]:
+    """Mescla tool_calls chegando em chunks de streaming.
+
+    Qwen via Ollama pode emitir a mesma tool call em pedaços (argumentos
+    parciais). Mescla por POSIÇÃO: a chamada na mesma posição acumula
+    argumentos; posições novas são adicionadas na ordem.
+    """
+    merged = list(existing)
+    for index, call in enumerate(incoming):
+        if index < len(merged):
+            current = merged[index]
+            args = dict(current.arguments or {})
+            args.update(dict(call.arguments or {}))
+            merged[index] = ToolCall(
+                id=current.id or call.id, name=call.name or current.name, arguments=args
+            )
+        else:
+            merged.append(call)
+    return merged

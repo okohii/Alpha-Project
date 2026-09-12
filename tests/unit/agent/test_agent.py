@@ -236,7 +236,9 @@ async def test_agent_survives_unexpected_tool_exception():
     result = await agent.chat("faça")
 
     assert "outro jeito" in result["response"]
-    assert "worker" in agent._tools_used
+    # Tool que explodiu NÃO entrou como ação executada: memória/evidência só
+    # registram execuções bem-sucedidas de verdade.
+    assert "worker" not in agent._tools_used
 
 
 def _mem(content: str, *, episode: bool = False):

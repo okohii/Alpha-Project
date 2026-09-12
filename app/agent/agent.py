@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -25,6 +27,7 @@ from app.security import (
     risk_requires_confirmation,
 )
 from app.skills.registry import SkillRegistry
+from app.speech.emotion import EmotionState, detect_explicit_emotion
 from app.tools.base import ToolPermission, ToolResult
 from app.tools.errors import ToolNotFoundError
 from app.tools.registry import ToolRegistry
@@ -80,6 +83,74 @@ _FALLBACK_ON_NO_SUCCESS = (
     "e tente novamente."
 )
 
+# ── Honesty Gate ────────────────────────────────────────────────────────────
+# A resposta final só pode afirmar sucesso quando há evidência observada de
+# execução real. Marcadores de falha DOMINAM qualquer alegação de sucesso
+# (ex.: "não consegui abrir", "tentei abrir", "o WhatsApp não abriu" nunca são
+# classificados como sucesso). A heurística é conservadora e em pt-BR.
+_FAILURE_CLAIM_RE = re.compile(
+    r"\b(?:"
+    r"n[aã]o\s+consegu[iue]|n[aã]o\s+conseguiu|n[aã]o\s+foi\s+poss[ií]vel|imposs[ií]vel|"
+    r"falhou|falhei|falha|falharam|falho|erro|erros|"
+    r"n[aã]o\s+abri|n[aã]o\s+abriu|n[aã]o\s+aberto|n[aã]o\s+foi\s+aberto|"
+    r"n[aã]o\s+deu\s+certo|n[aã]o\s+funcionou|n[aã]o\s+carregou|"
+    r"n[aã]o\s+encontrei|n[aã]o\s+encontrad|n[aã]o\s+foi\s+salvo|n[aã]o\s+salvo|"
+    r"n[aã]o\s+foi\s+executad|n[aã]o\s+foi\s+realizad|"
+    r"tentei|tentou|tentamos|recusad|negad|problema|problemas|pendente|"
+    r"deu\s+errado|n[aã]o\s+est[aá]\s+aberto|n[aã]o\s+abriu"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_SUCCESS_CLAIM_RE = re.compile(
+    r"\b(?:"
+    r"abri\s|abriu\s|foi\s+aberto|est[aá]\s+aberto|estava\s+aberto|"
+    r"consegui\s|conseguiu\s|deu\s+certo|funcionou\b|"
+    r"conclu[ií](?:do)?\b|completad|foi\s+conclu[ií]do|"
+    r"encontrei\b|localizei\b|enviei\b|carreguei\b|criei\b|foi\s+criad|"
+    r"foi\s+(?:executad|realizad)|executado\s+com\s+sucesso|com\s+sucesso"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_MEMORY_CLAIM_RE = re.compile(
+    r"\b(?:"
+    r"guardei|guardad[oa]s?|registrei|registrad[oa]s?|anotei|anotad[oa]s?|"
+    r"memorizei|memorizad[oa]s?|salvei|salv[ao]s?|foi\s+salv[ao]s?|est[aá]\s+salv[ao]s?|"
+    r"gravei|gravad[oa]s?|foi\s+gravad[oa]s?|persisti|persistid[oa]s?|"
+    r"est[aá]\s+no\s+banco|t[aá]\s+no\s+banco|cadastrei|cadastrad[oa]s?|"
+    r"mem[oó]ria\s+salv[ao]s?|mem[oó]ria\s+gravad[oa]s?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_HONESTY_MEMORY_UNCONFIRMED = (
+    "Não posso confirmar que isso foi salvo: nenhuma operação de memória "
+    "foi executada com sucesso neste turno."
+)
+
+# ── Textual tool call ───────────────────────────────────────────────────────
+# Se o modelo tentar emitir chamada de ferramenta como JSON textual (em vez
+# do tool calling nativo), o conteúdo é bloqueado: nada é executado e o JSON
+# jamais chega ao usuário/TTS.
+_TEXTUAL_TOOL_CALL_BLOCKED = (
+    "Recebi uma chamada de ferramenta em formato textual e não a executei. "
+    "Vou tentar de outra forma."
+)
+_JSON_FRAGMENT_RE = re.compile(r"\{(?:[^{}]|\{[^{}]*\})*\}")
+
+
+def _is_tool_call_json_payload(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if "tool_calls" in payload:
+        return True
+    if isinstance(payload.get("name"), str) and (
+        "arguments" in payload or set(payload) <= {"name", "arguments"} or "parameters" in payload
+    ):
+        return True
+    return False
+
 
 @dataclass(slots=True)
 class AgentResult:
@@ -88,6 +159,76 @@ class AgentResult:
     memory_created: bool = False
     tool_calls: list[dict[str, Any]] | None = None
     evidence: list[dict[str, Any]] | None = None
+
+
+class ExecutionContext:
+    """Contexto de execução criado fresh para cada turno.
+
+    Este objeto NÃO é reutilizado entre turnos. Ele isola o estado operacional
+    (tools selecionadas, resultados, evidence, emoção, tarefas pendentes) do
+    histórico conversacional, de modo que cancelamento, falha ou timeout de uma
+    execução não contaminam o próximo turno.
+
+    Atributos somente-leitura após init; nada disso persiste implicitamente.
+    """
+
+    def __init__(
+        self,
+        execution_id: str,
+        user_message: str,
+        task: str | None = None,
+        selected_skills: list[str] | None = None,
+        exposed_tools: set[str] | None = None,
+        permissions: set[str] | None = None,
+    ) -> None:
+        self.execution_id = execution_id
+        self.user_message = user_message
+        self.task = task
+        self.selected_skills = selected_skills or []
+        self.exposed_tools = exposed_tools or set()
+        self.permissions = permissions or set()
+        # Estado que deve ser limpo ao final ou em cancelamento
+        self.tool_calls: list[ToolCall] = []
+        self.tool_results: list[ExecutionEvidence] = []
+        self.evidence: list[ExecutionEvidence] = []
+        self.response_candidate: str | None = None
+        self.emotion_state: EmotionState | None = None
+        self.current_step: int = 0
+        self.cancellation_requested: bool = False
+        self.trace: list[dict[str, Any]] = []
+
+    def reset(self) -> None:
+        """Limpa todo o estado operacional, mantendo apenas os identificadores."""
+        self.tool_calls.clear()
+        self.tool_results.clear()
+        self.evidence.clear()
+        self.response_candidate = None
+        self.emotion_state = None
+        self.current_step = 0
+        self.cancellation_requested = False
+        self.trace.clear()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "execution_id": self.execution_id,
+            "user_message": self.user_message,
+            "task": self.task,
+            "selected_skills": self.selected_skills,
+            "exposed_tools": sorted(self.exposed_tools),
+            "permissions": sorted(self.permissions),
+            "tool_calls": [tc.name for tc in self.tool_calls],
+            "tool_results": [er.to_dict() if er else None for er in self.tool_results],
+            "evidence_count": len(self.evidence),
+            "response_candidate": self.response_candidate,
+            "emotion_state": self.emotion_state.to_dict() if self.emotion_state else None,
+            "current_step": self.current_step,
+            "cancellation_requested": self.cancellation_requested,
+        }
+
+
+def _new_execution_id() -> str:
+    import uuid as _uuid
+    return f"exec-{_uuid.uuid4().hex[:12]}"
 
 
 class AgentCore:
@@ -297,6 +438,29 @@ class AgentCore:
         stream_tokens: bool = False,
     ) -> dict[str, Any]:
         conversation_id = conversation_id or str(uuid4())
+        # Cria um novo ExecutionContext para este turno — nada do turno
+        # anterior deve vazar. O contexto será redefinido ao final desta
+        # função, garantindo isolamento entre execuções.
+        context = ExecutionContext(
+            execution_id=_new_execution_id(),
+            user_message=message,
+        )
+        logger.info("[execution] id=%s turn=started task=%r", context.execution_id, message[:80])
+        # Emoção EXPLÍCITA pedida pelo usuário (ex.: "quero um tom triste").
+        # Detectada antes do loop e anexada ao contexto do turno — cada turno
+        # tem seu próprio contexto, então a emoção nunca herda o turno anterior.
+        explicit_emotion = detect_explicit_emotion(message)
+        if explicit_emotion is not None:
+            context.emotion_state = explicit_emotion
+        # Turno que pede apenas um tom (sem ação) não expõe ferramenta alguma:
+        # time/web_search/browser/memória não têm o que fazer aqui e a escolha
+        # é do modelo — melhor remover a superfície de erro.
+        _turn_skills = (
+            self.skill_registry.select_skills_for_task(message)
+            if self.skill_registry is not None
+            else []
+        )
+        emotional_only = explicit_emotion is not None and not _turn_skills
         provider = self.llm_router.choose(message)
         # Build provider metadata for the response
         provider_class = provider.__class__.__name__
@@ -359,9 +523,7 @@ class AgentCore:
 
         memory_context: list[str] = []
         if self.memory_service is not None:
-            memories = await self.memory_service.search_memories(
-                message, limit=self.settings.rag_top_k
-            )
+            memories = await self._search_relevant_memories(message)
             memory_context = [
                 self._memory_context_line(memory)
                 for memory in memories
@@ -421,6 +583,8 @@ class AgentCore:
             conversation_id,
             stream_tokens=stream_tokens,
             task=message,
+            context=context,
+            expose_tools=not emotional_only,
         )
 
         if self.db_session is not None:
@@ -437,19 +601,20 @@ class AgentCore:
                     EventType.memory_created, {"conversation_id": conversation_id}
                 )
 
+        emotion = context.emotion_state.to_dict() if context.emotion_state is not None else None
+        tools_used = list(self._tools_used)
+        evidence_out = list(self._evidence)
+        # Reset context: estado operacional não persiste para o próximo turno
+        context.reset()
         return {
             "response": response.content,
             "conversation_id": conversation_id,
             "memory_created": memory_created,
-            "tools_used": list(self._tools_used),
-            "evidence": list(self._evidence),
+            "emotion": emotion,
+            "tools_used": tools_used,
+            "evidence": evidence_out,
             "security_audit": list(self._security_log),
-            "provider": {
-                "provider_class": provider_class,
-                "model": provider_model,
-                "base_url": provider_base,
-                "mode": self.settings.llm_mode,
-            },
+            "facilitator": True,
         }
 
     async def _run_agent_loop(
@@ -460,6 +625,8 @@ class AgentCore:
         conversation_id: str | None = None,
         stream_tokens: bool = False,
         task: str = "",
+        context: ExecutionContext | None = None,
+        expose_tools: bool = True,
     ) -> tuple[LLMResponse, list[LLMMessage]]:
         """Executa o ciclo Agent ↔ Tools preservando o protocolo correto.
 
@@ -471,7 +638,7 @@ class AgentCore:
         resultados (pairing por ``tool_call_id``), repetições da mesma chamada
         são bloqueadas e o limite ``AGENT_MAX_TOOL_ITERATIONS`` é respeitado.
         """
-        allowed_names = self._initial_tool_names(task, permissions)
+        allowed_names = self._initial_tool_names(task, permissions) if expose_tools else set()
         evidence: list[ExecutionEvidence] = []
         new_messages: list[LLMMessage] = []
         executed_signatures: set[str] = set()
@@ -486,7 +653,7 @@ class AgentCore:
             # resultados das ferramentas — nunca tool(result) sem assistant(tool_calls).
             assistant_turn = LLMMessage(
                 role="assistant",
-                content=last_response.content or "",
+                content=AgentCore._scrub_internal_json(last_response.content or ""),
                 tool_calls=last_response.tool_calls,
             )
             messages.append(assistant_turn)
@@ -521,12 +688,22 @@ class AgentCore:
             iterations += 1
 
         content = last_response.content or ""
+        # Textual tool call (JSON) jamais chega ao usuário/TTS e nunca executa.
+        content = AgentCore._scrub_internal_json(content)
+        if content and content != content.strip():
+            content = content.strip()
+        # Honesty Gate: alegação de sucesso sem execução real é substituída.
+        content = self._apply_honesty_gate(content, evidence)
         if not content and evidence and not any(item.success for item in evidence):
             content = _FALLBACK_ON_NO_SUCCESS
         final = LLMMessage(role="assistant", content=content)
         messages.append(final)
         new_messages.append(final)
         self._evidence = [item.to_dict() for item in evidence]
+        if context is not None:
+            context.evidence = list(evidence)
+            context.exposed_tools = set(allowed_names)
+            context.response_candidate = content
         self._emit(
             EventType.assistant_message,
             payload={"preview": content[:120], "content": content},
@@ -562,6 +739,94 @@ class AgentCore:
             ),
             tool_call_id=tool_call.id,
         )
+
+    # ── Honesty Gate ─────────────────────────────────────────────────────
+    # A resposta final só pode afirmar sucesso quando há evidência real de
+    # execução (ToolResult success → Evidence EXECUTED). Alegações sem
+    # execução são substituídas por uma resposta honesta.
+
+    @staticmethod
+    def _claims_success(text: str) -> bool:
+        """Detecta alegação de sucesso em pt-BR, sem falsos positivos de negação.
+
+        Marcadores de falha dominam: "não consegui abrir", "tentei abrir",
+        "o WhatsApp não abriu", "não foi possível" NUNCA viram sucesso.
+        """
+        if not text or not text.strip():
+            return False
+        if _FAILURE_CLAIM_RE.search(text):
+            return False
+        return bool(_SUCCESS_CLAIM_RE.search(text))
+
+    @staticmethod
+    def _claims_memory_success(text: str) -> bool:
+        if not text or not text.strip():
+            return False
+        if _FAILURE_CLAIM_RE.search(text):
+            return False
+        return bool(_MEMORY_CLAIM_RE.search(text))
+
+    def _apply_honesty_gate(
+        self, content: str, evidence: list[ExecutionEvidence]
+    ) -> str:
+        if not content or not content.strip():
+            return content
+        successful = [item for item in evidence if item.success]
+        memory_ok = any(
+            item.tool in ("memory_save", "procedure_save") for item in successful
+        )
+        if self._claims_memory_success(content) and not memory_ok:
+            self._emit(
+                EventType.honesty_gate,
+                {"claim": "memory_persistence", "executed": False},
+            )
+            logger.warning(
+                "[honesty] memory claim sem memory_save success no turno %s",
+                getattr(self, "_facilitator_goal", None),
+            )
+            return _HONESTY_MEMORY_UNCONFIRMED
+        if self._claims_success(content) and not successful:
+            self._emit(
+                EventType.honesty_gate,
+                {"claim": "action_success", "executed": False},
+            )
+            logger.warning("[honesty] success claim sem evidência de execução")
+            return _FALLBACK_ON_NO_SUCCESS
+        return content
+
+    # ── Textual tool call (JSON) ─────────────────────────────────────────
+
+    @staticmethod
+    def _parse_tool_call_json(content: str) -> dict | None:
+        """Reconhece um JSON textual de tool call no conteúdo do modelo."""
+        stripped = (content or "").strip()
+        if not stripped.startswith("{"):
+            return None
+        try:
+            payload = json.loads(stripped)
+        except (TypeError, ValueError):
+            return None
+        if _is_tool_call_json_payload(payload):
+            return payload
+        return None
+
+    @staticmethod
+    def _scrub_internal_json(content: str) -> str:
+        """Remove/nega JSON textual de tool call antes de chegar ao usuário/TTS.
+
+        - Conteúdo que é apenas o JSON → mensagem PARSE_FAILED (sem execução);
+        - JSON tool-call embutido em texto → fragmento removido.
+        """
+        if AgentCore._parse_tool_call_json(content) is not None:
+            return _TEXTUAL_TOOL_CALL_BLOCKED
+
+        def _repl(match: re.Match[str]) -> str:
+            candidate = match.group(0)
+            if AgentCore._parse_tool_call_json(candidate) is not None:
+                return ""
+            return candidate
+
+        return _JSON_FRAGMENT_RE.sub(_repl, content)
 
     async def _execute_tool(
         self,
@@ -725,6 +990,36 @@ class AgentCore:
                     success=False,
                     response={},
                     error=validation_error,
+                    tool_call_id=tool_call.id,
+                ),
+                None,
+            )
+
+        # Gate de exposição: o modelo só pode executar ferramentas ANUNCIADAS
+        # no turno (skill selecionada + permissão). Chamada alucinada para fora
+        # do conjunto é recusada — nunca vira execução real. Permissão/confirmação
+        # são avaliadas antes; a exposição restringe o catálogo efetivamente
+        # executável mesmo quando a permissão existe.
+        if tool_call.name not in allowed_names:
+            decision.decision = "denied_not_exposed"
+            decision.reason = (
+                f"ferramenta '{tool.name}' não anunciada no turno (skills selecionadas)"
+            )
+            self._audit_decision(decision)
+            self._emit(
+                EventType.tool_failed,
+                {"tool": tool.name, "error": "ferramenta não exposta neste turno"},
+            )
+            return (
+                self._tool_result_message(
+                    tool.name,
+                    success=False,
+                    response={},
+                    error=(
+                        f"A ferramenta '{tool.name}' não está disponível neste turno. "
+                        "Use apenas as ferramentas anunciadas."
+                    ),
+                    alternatives=sorted(allowed_names)[:8] or None,
                     tool_call_id=tool_call.id,
                 ),
                 None,
@@ -900,7 +1195,10 @@ class AgentCore:
                 },
                 duration_ms=_duration_ms(started_at),
             )
-        self._tools_used.append(tool.name)
+        # Só adiciona _tools_used se a tool realmente executou com sucesso.
+        # Falhas/negados não devem aparecer como 'ações executadas' na memória.
+        if result.success:
+            self._tools_used.append(tool.name)
         await self._record_tool_execution(
             conversation_id,
             tool_name=tool.name,
@@ -1437,6 +1735,27 @@ class AgentCore:
             pass
 
         return system_prompt
+
+    async def _search_relevant_memories(self, query: str) -> list[Any]:
+        """Busca memórias aplicando o corte determinístico de relevância.
+
+        Memória irrelevante NÃO vira contexto operacional. O corte usa o score
+        híbrido (embedding + léxico) já calculado no repositório. Serviços que
+        não aceitam ``min_score`` (mocks de teste antigos) seguem retornando
+        apenas o top-N.
+        """
+        service = self.memory_service
+        try:
+            parameters = inspect.signature(service.search_memories).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "min_score" in parameters:
+            return await service.search_memories(
+                query,
+                limit=self.settings.rag_top_k,
+                min_score=self.settings.memory_relevance_min_score,
+            )
+        return await service.search_memories(query, limit=self.settings.rag_top_k)
 
     @staticmethod
     def _memory_context_line(memory: Any) -> str:

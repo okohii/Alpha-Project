@@ -140,6 +140,35 @@ def build_default_tool_registry(
         tools["calendar_delete"] = CalendarDeleteTool(calendar_service)
     if document_indexer_factory is not None:
         tools["document_search"] = DocumentSearchTool(document_indexer_factory)
+
+    # Tools de macros: registradas sempre que o serviço estiver disponível.
+    try:
+        from app.macros.tools import (
+            MacroCreateTool,
+            MacroDeleteTool,
+            MacroListTool,
+            MacroRunTool,
+            MacroSchedulesDeleteTool,
+            MacroSchedulesEditTool,
+            MacroSchedulesTool,
+            MacroScheduleTool,
+        )
+
+        macro_classes = (
+            MacroListTool,
+            MacroRunTool,
+            MacroCreateTool,
+            MacroDeleteTool,
+            MacroScheduleTool,
+            MacroSchedulesTool,
+            MacroSchedulesEditTool,
+            MacroSchedulesDeleteTool,
+        )
+        for cls in macro_classes:
+            tools.setdefault(cls.name, cls())
+    except ImportError:  # pragma: no cover - dependência opcional
+        pass
+
     return ToolRegistry(tools=tools)
 
 

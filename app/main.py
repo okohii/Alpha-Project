@@ -11,11 +11,13 @@ from app.api.routes_memory import router as memory_router
 from app.api.routes_settings import router as settings_router
 from app.api.routes_tasks import router as tasks_router
 from app.api.routes_voice import router as voice_router
+from app.avatar import avatar_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import AsyncSessionLocal, initialize_database
 from app.macros.service import macro_service
 from app.notification import play_notification_sound, show_notification
+from app.overlay import overlay_router
 from app.reminders.runner import SchedulerRunner
 
 configure_logging()
@@ -60,3 +62,5 @@ app.include_router(macros_router)
 app.include_router(conversations_router)
 app.include_router(settings_router)
 app.include_router(tasks_router)
+app.include_router(overlay_router)
+app.include_router(avatar_router)

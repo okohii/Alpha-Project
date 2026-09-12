@@ -39,6 +39,13 @@ class ExecutionEvidence:
     result: dict[str, Any]
     error: str | None = None
     verified: bool = False
+    # Ciclo de vida observado da execução. Valores: "requested", "executing",
+    # "executed", "failed", "observed", "verified", "parse_failed".
+    status: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.status:
+            self.status = "executed" if self.success else "failed"
 
     def to_dict(self) -> dict[str, Any]:
         return {key: getattr(self, key) for key in self.__dataclass_fields__}

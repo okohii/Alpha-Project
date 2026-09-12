@@ -5,6 +5,10 @@ from app.skills.base import Skill
 SKILL = Skill(
     name="Files",
     description="Leitura, escrita, busca e metadados de arquivos autorizados.",
+    keywords=[
+        "arquivo", "pasta", "diretório", "diretorio",
+        "download", "documento", "abrir arquivo", "ler arquivo",
+    ],
     tools=[
         "file_search",
         "file_read",

@@ -646,7 +646,7 @@ class MacroGui:
                 schedule_info = f"1x em {s.run_at.astimezone().strftime('%d/%m/%Y %H:%M')}"
             schedule_info = schedule_info or "-"
             # Converte para horário de Brasília (UTC-3) para display consistente
-            from datetime import timezone, timedelta
+            from datetime import timedelta, timezone
             brasilia_tz = timezone(timedelta(hours=-3))
             next_run = (
                 s.next_run_at.astimezone(brasilia_tz).strftime("%d/%m/%Y %H:%M")

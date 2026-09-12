@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
-
-
+import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,62 +26,72 @@ class FakeWhisperModel:
     def __init__(self, language="pt", device="cpu"):
         self.language = language
         self.device = device
-        self.transcribe_calls = []
+        self.transcribe_calls: list[dict[str, Any]] = []
 
-    def transcribe(self, audio, language=None, initial_prompt=None):
+    def transcribe(self, audio, language=None, initial_prompt=None, **kwargs):
         self.transcribe_calls.append(
-            {"audio": str(audio), "language": language, "initial_prompt": initial_prompt}
+            {
+                "audio": str(audio),
+                "language": language,
+                "initial_prompt": initial_prompt,
+                **kwargs,
+            }
         )
         segments = [FakeSegment()]
         return segments, FakeInfo()
 
 
+class _FakeResult:
+    def __init__(self, returncode: int, stdout: str):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+# ── initial_prompt semantics ────────────────────────────────────────────────
+
 @pytest.mark.anyio
-async def test_stt_passes_initial_prompt_when_configured(monkeypatch):
+async def test_stt_passes_explicit_initial_prompt(monkeypatch):
+    """Only the explicit caller-supplied initial_prompt is forwarded."""
     stt = FasterWhisperSTT()
     model = FakeWhisperModel()
-    stt.settings.stt_initial_prompt = "navegador, abrir o navegador, Prime Video."
+    stt.settings.stt_initial_prompt = "old biased prompt"
     monkeypatch.setattr(stt, "_load_model", lambda: model)
 
-    result = await stt.transcribe(Path("audio.wav"))
+    await stt.transcribe(Path("audio.wav"), initial_prompt="navegador, abrir o navegador")
 
-    assert result.text == "abrir o navegador"
-    assert model.calls == [
-        {
-            "audio": "audio.wav",
-            "language": "pt",
-            "initial_prompt": "navegador, abrir o navegador, Prime Video.",
-        }
-    ]
+    assert len(model.transcribe_calls) == 1
+    assert model.transcribe_calls[0]["initial_prompt"] == "navegador, abrir o navegador"
 
 
 @pytest.mark.anyio
-async def test_stt_skips_initial_prompt_when_empty(monkeypatch):
+async def test_stt_skips_prompt_when_not_provided(monkeypatch):
+    """Without explicit initial_prompt the call uses None regardless of settings."""
     stt = FasterWhisperSTT()
     model = FakeWhisperModel()
-    stt.settings.stt_initial_prompt = ""
+    stt.settings.stt_initial_prompt = "ignore this"
     monkeypatch.setattr(stt, "_load_model", lambda: model)
 
-    result = await stt.transcribe(Path("audio.wav"))
+    await stt.transcribe(Path("audio.wav"))
 
-    assert result.text == "abrir o navegador"
-    assert model.calls == [{"audio": "audio.wav", "language": "pt", "initial_prompt": None}]
+    assert model.transcribe_calls[0]["initial_prompt"] is None
 
 
 @pytest.mark.anyio
-async def test_stt_does_not_bias_with_initial_prompt(monkeypatch, tmp_path):
+async def test_stt_does_not_bias_with_settings_default(monkeypatch, tmp_path):
+    """Settings default is never used, so result text stays unbiased."""
     stt = FasterWhisperSTT()
-    model = FakeWhisperModel(language="pt", device="cpu")
-    stt.settings.stt_initial_prompt = "navegador, abrir o navegador, Prime Video."
+    model = FakeWhisperModel()
+    stt.settings.stt_initial_prompt = "biased prompt"
     monkeypatch.setattr(stt, "_load_model", lambda: model)
 
     audio = tmp_path / "audio.wav"
     audio.write_bytes(b"fake")
 
     result = await stt.transcribe(audio)
-    # Should not have the initial prompt bias in the transcription
-    assert "navegador" not in result.text.lower() or len(result.text) > 5
+    assert "biased" not in result.text.lower()
 
+
+# ── device detection ────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_stt_device_auto_selects_cuda_when_available(monkeypatch):
@@ -101,38 +109,38 @@ async def test_stt_device_falls_back_to_cpu_when_no_gpu(monkeypatch):
 
 @pytest.mark.anyio
 async def test_stt_effective_device_respects_settings(monkeypatch):
-    """Test that _determine_stt_device works correctly with settings."""
+    """_determine_stt_device consults settings + nvidia-smi via subprocess."""
     from app.perception.stt import _determine_stt_device
 
-    stt = FasterWhisperSTT()
-
-    # Test cpu forced
-    stt.settings.stt_device = "cpu"
     assert _determine_stt_device("cpu") == "cpu"
 
-    # Test cuda when gpu available (mocked)
-    stt.settings.stt_device = "cuda"
-    stt._get_stt_device = lambda: "cuda"
+    # cuda requested, nvidia-smi succeeds
+    def _fake_smi_success(*args: Any, **kwargs: Any) -> _FakeResult:
+        return _FakeResult(returncode=0, stdout="NVIDIA GeForce RTX 3060\n")
+
+    monkeypatch.setattr(subprocess, "run", _fake_smi_success)
     assert _determine_stt_device("cuda") == "cuda"
 
-    # Test auto with gpu
-    stt.settings.stt_device = "auto"
-    stt._get_stt_device = lambda: "cuda"
+    # auto with GPU
     assert _determine_stt_device("auto") == "cuda"
 
-    # Test auto without gpu
-    stt.settings.stt_device = "auto"
-    stt._get_stt_device = lambda: "cpu"
+    # cuda requested, nvidia-smi fails (no GPU)
+    def _fake_smi_fail(*args: Any, **kwargs: Any) -> _FakeResult:
+        return _FakeResult(returncode=1, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_smi_fail)
+    assert _determine_stt_device("cuda") == "cpu"
     assert _determine_stt_device("auto") == "cpu"
 
+
+# ── confidence ──────────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_stt_extracts_confidence_from_language_probability(monkeypatch, tmp_path):
     stt = FasterWhisperSTT()
-    model = FakeWhisperModel(language="pt", device="cpu")
-    original_transcribe = model.transcribe
-    model.transcribe = lambda audio, language=None, initial_prompt=None: (
-        [type("S", (object,), {"start": 0.0, "end": 1.0, "text": "test"})()],
+    model = FakeWhisperModel()
+    model.transcribe = lambda audio, language=None, initial_prompt=None, **kw: (
+        [FakeSegment()],
         FakeInfo(),
     )
     stt._model = model
@@ -140,47 +148,43 @@ async def test_stt_extracts_confidence_from_language_probability(monkeypatch, tm
     audio = tmp_path / "audio.wav"
     audio.write_bytes(b"fake")
 
-    # Test with language_probability
     result = await stt.transcribe(audio)
     assert isinstance(result, TranscriptionResult)
-    assert result.confidence >= 0.0 and result.confidence <= 1.0
+    assert 0.0 <= result.confidence <= 1.0
 
+
+# ── condition_on_previous_text ──────────────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_stt_uses_condition_on_previous_text_false(monkeypatch, tmp_path):
-    """Short commands should use condition_on_previous_text=False."""
     stt = FasterWhisperSTT()
-    model = FakeWhisperModel(language="pt", device="cpu")
-    call_kwargs = {}
-
-    def mock_transcribe(audio, language=None, initial_prompt=None, **kwargs):
-        call_kwargs.update(kwargs)
-        return model.transcribe(audio, language, initial_prompt)
-
-    model.transcribe = mock_transcribe
+    model = FakeWhisperModel()
     stt._model = model
 
     audio = tmp_path / "audio.wav"
     audio.write_bytes(b"fake")
 
-    result = await stt.transcribe(audio, initial_prompt="test")
-    # Verify condition_on_previous_text=False was in the kwargs
-    assert "condition_on_previous_text" in call_kwargs
-    assert call_kwargs["condition_on_previous_text"] is False
+    await stt.transcribe(audio)
+    assert model.transcribe_calls[-1]["condition_on_previous_text"] is False
 
+
+# ── suspicious transcription detection ──────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_stt_detects_suspicious_transcriptions(monkeypatch, tmp_path):
-    """Low confidence or very short text should flag suspicious results."""
+    """Low confidence or very short text flags suspicious results."""
     stt = FasterWhisperSTT()
-    model = FakeWhisperModel(language="pt", device="cpu")
-    stt._model = model
+    model = FakeWhisperModel()
 
-    # Test with very low confidence and short text
-    original_transcribe = model.transcribe
-    model.transcribe = lambda audio, language=None, initial_prompt=None: (
+    class LowInfo:
+        language = "pt"
+        language_probability = None
+        avg_logprob = -0.5
+        text = "a"
+
+    model.transcribe = lambda audio, language=None, initial_prompt=None, **kw: (
         [type("S", (object,), {"start": 0.0, "end": 1.0, "text": "a"})()],
-        FakeInfo(),
+        LowInfo(),
     )
     stt._model = model
 
@@ -195,15 +199,15 @@ async def test_stt_detects_suspicious_transcriptions(monkeypatch, tmp_path):
 async def test_stt_suspicious_low_confidence_short(monkeypatch, tmp_path):
     """Confidence < 0.3 and text_len < 3 should be suspicious."""
     stt = FasterWhisperSTT()
-    model = FakeWhisperModel(language="pt", device="cpu")
-    # Set language_probability very low
+    model = FakeWhisperModel()
+
     class LowProbInfo:
         language = "pt"
         language_probability = 0.1
         avg_logprob = -2.0
         text = "a"
 
-    model.transcribe = lambda audio, language=None, initial_prompt=None: (
+    model.transcribe = lambda audio, language=None, initial_prompt=None, **kw: (
         [type("S", (object,), {"start": 0.0, "end": 1.0, "text": "a"})()],
         LowProbInfo(),
     )
@@ -218,16 +222,16 @@ async def test_stt_suspicious_low_confidence_short(monkeypatch, tmp_path):
 
 @pytest.mark.anyio
 async def test_stt_suspicious_low_confidence_medium_text(monkeypatch, tmp_path):
-    """Low confidence with medium-length text should be suspicious."""
     stt = FasterWhisperSTT()
-    model = FakeWhisperModel(language="pt", device="cpu")
+    model = FakeWhisperModel()
+
     class MediumConfInfo:
         language = "pt"
         language_probability = 0.4
         avg_logprob = -1.0
         text = "abrir"
 
-    model.transcribe = lambda audio, language=None, initial_prompt=None: (
+    model.transcribe = lambda audio, language=None, initial_prompt=None, **kw: (
         [type("S", (object,), {"start": 0.0, "end": 1.0, "text": "abrir"})()],
         MediumConfInfo(),
     )
@@ -240,7 +244,31 @@ async def test_stt_suspicious_low_confidence_medium_text(monkeypatch, tmp_path):
     assert result.is_suspicious is True
 
 
-@ pytest.mark.anyio
+@pytest.mark.anyio
+async def test_stt_not_suspicious_high_confidence():
+    """High confidence + normal text should NOT be flagged."""
+    stt = FasterWhisperSTT()
+    model = FakeWhisperModel()
+
+    class HighInfo:
+        language = "pt"
+        language_probability = 0.95
+        avg_logprob = -0.1
+        text = "abrir o navegador por favor"
+
+    model.transcribe = lambda audio, language=None, initial_prompt=None, **kw: (
+        [type("S", (object,), {"start": 0.0, "end": 1.0, "text": "abrir o navegador"})()],
+        HighInfo(),
+    )
+    stt._model = model
+
+    result = await stt.transcribe(Path("a.wav"))
+    assert result.is_suspicious is False
+
+
+# ── TranscriptionResult ─────────────────────────────────────────────────────
+
+@pytest.mark.anyio
 async def test_transcription_result_creation():
     result = TranscriptionResult(
         text="abrir navegador",

@@ -75,3 +75,5 @@ logs/
 *.temp
 
 alpha_startup.sh
+
+models/kokoro/*
