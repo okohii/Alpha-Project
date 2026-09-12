@@ -41,15 +41,30 @@ class KokoroTTS(TextToSpeech):
         self.voice = str(self.voice_path)
         self.sample_rate = 24000
         self._device = "cpu"
+        self._torch = None
         self._validate_model_files()
 
         try:
             import torch
+            self._torch = torch
             requested = str(self.settings.tts_device).lower().strip()
-            if requested == "cuda" or (requested == "auto" and torch.cuda.is_available()):
+            cuda_available = bool(torch.cuda.is_available())
+            if requested == "cuda" and not cuda_available:
+                raise TextToSpeechError(
+                    "TTS configurado para CUDA, mas torch.cuda.is_available() retornou False. "
+                    "Instale uma build CUDA do PyTorch compatível com sua RTX 3050."
+                )
+            if requested not in {"auto", "cuda", "cpu"}:
+                raise TextToSpeechError(f"Dispositivo TTS inválido: {self.settings.tts_device!r}")
+            if requested == "cuda" or (requested == "auto" and cuda_available):
                 self._device = "cuda"
-        except Exception:
-            self._device = "cpu"
+                logger.info("[TTS] CUDA disponível gpu=%s", torch.cuda.get_device_name(0))
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
+        except TextToSpeechError:
+            raise
+        except Exception as exc:
+            raise TextToSpeechError(f"Falha ao detectar dispositivo do Kokoro: {exc}") from exc
 
         try:
             model = KModel(
@@ -59,6 +74,9 @@ class KokoroTTS(TextToSpeech):
             )
             if self._device == "cuda" and hasattr(model, "to"):
                 model = model.to("cuda")
+            if hasattr(model, "eval"):
+                model = model.eval()
+            self._model = model
             self._pipeline = KPipeline(
                 lang_code="p",
                 repo_id="hexgrad/Kokoro-82M",
@@ -102,13 +120,14 @@ class KokoroTTS(TextToSpeech):
         temp_dir = Path(tempfile.mkdtemp(prefix="alpha-kokoro-"))
         output_path = temp_dir / "speech.wav"
         try:
-            generator = self._pipeline(segments[0] if len(segments) == 1 else segments, voice=voice, speed=profile.speed)
-            audio_chunks: list[np.ndarray] = []
-            for _, _, audio in generator:
-                if audio is not None:
-                    audio_array = np.asarray(audio)
-                    if audio_array.size:
-                        audio_chunks.append(audio_array)
+            with self._torch.inference_mode() if self._torch is not None else _nullcontext():
+                generator = self._pipeline(segments[0] if len(segments) == 1 else segments, voice=voice, speed=profile.speed)
+                audio_chunks: list[np.ndarray] = []
+                for _, _, audio in generator:
+                    if audio is not None:
+                        audio_array = np.asarray(audio)
+                        if audio_array.size:
+                            audio_chunks.append(audio_array)
             if not audio_chunks:
                 raise TextToSpeechError("Kokoro não gerou nenhum áudio.")
             sf.write(str(output_path), np.concatenate(audio_chunks), self.sample_rate)
@@ -130,20 +149,21 @@ class KokoroTTS(TextToSpeech):
         def worker() -> None:
             temp_dir = Path(tempfile.mkdtemp(prefix="alpha-kokoro-stream-"))
             try:
-                for index, segment in enumerate(segments):
-                    generator = self._pipeline(segment, voice=voice, speed=profile.speed)
-                    audio_chunks: list[np.ndarray] = []
-                    for _, _, audio in generator:
-                        if audio is None:
-                            continue
-                        audio_array = np.asarray(audio)
-                        if audio_array.size:
-                            audio_chunks.append(audio_array)
-                    if not audio_chunks:
-                        raise TextToSpeechError(f"Kokoro não gerou áudio para o segmento {index + 1}.")
-                    path = temp_dir / f"chunk_{index:03d}.wav"
-                    sf.write(str(path), np.concatenate(audio_chunks), self.sample_rate)
-                    asyncio.run_coroutine_threadsafe(queue.put(path), loop).result()
+                with self._torch.inference_mode() if self._torch is not None else _nullcontext():
+                    for index, segment in enumerate(segments):
+                        generator = self._pipeline(segment, voice=voice, speed=profile.speed)
+                        audio_chunks: list[np.ndarray] = []
+                        for _, _, audio in generator:
+                            if audio is None:
+                                continue
+                            audio_array = np.asarray(audio)
+                            if audio_array.size:
+                                audio_chunks.append(audio_array)
+                        if not audio_chunks:
+                            raise TextToSpeechError(f"Kokoro não gerou áudio para o segmento {index + 1}.")
+                        path = temp_dir / f"chunk_{index:03d}.wav"
+                        sf.write(str(path), np.concatenate(audio_chunks), self.sample_rate)
+                        asyncio.run_coroutine_threadsafe(queue.put(path), loop).result()
             except BaseException as exc:
                 asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
             finally:
@@ -158,3 +178,11 @@ class KokoroTTS(TextToSpeech):
             if isinstance(item, BaseException):
                 raise item
             yield item
+
+
+class _nullcontext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False

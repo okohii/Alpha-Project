@@ -36,24 +36,46 @@ class SpeechToText(ABC):
         raise NotImplementedError
 
 
+def _cuda_available() -> bool:
+    """Check the actual CTranslate2 CUDA backend used by faster-whisper."""
+    try:
+        import ctranslate2
+        count = int(ctranslate2.get_cuda_device_count())
+        if count <= 0:
+            return False
+        supported = ctranslate2.get_supported_compute_types("cuda")
+        return bool(supported)
+    except Exception as exc:
+        logger.warning("[stt] cuda_backend_unavailable reason=%s", exc)
+        return False
+
+
 def _determine_stt_device(settings_device: str) -> str:
-    if settings_device == "cpu":
+    requested = str(settings_device or "auto").lower().strip()
+    if requested == "cpu":
         return "cpu"
-    if settings_device in ("auto", "cuda"):
-        import subprocess
-        try:
-            result = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,no-header"], capture_output=True, text=True, timeout=2)
-            if result.returncode == 0 and result.stdout.strip():
-                return "cuda"
-        except Exception:
-            pass
-    return "cpu"
+    available = _cuda_available()
+    if requested == "cuda":
+        if not available:
+            raise SpeechToTextError(
+                "STT configurado para CUDA, mas o backend CUDA do CTranslate2 não está disponível. "
+                "Instale uma versão CUDA de ctranslate2/faster-whisper compatível com sua GPU."
+            )
+        return "cuda"
+    if requested == "auto":
+        return "cuda" if available else "cpu"
+    raise SpeechToTextError(f"Dispositivo STT inválido: {settings_device!r}")
 
 
 def _compute_type_for_device(compute_type: str, device: str) -> str:
+    requested = str(compute_type or "auto").lower().strip()
     if device == "cuda":
-        return "float16" if compute_type == "auto" else compute_type
-    return "int8" if compute_type == "auto" else compute_type
+        if requested == "auto":
+            return "float16"
+        return requested
+    if requested == "auto":
+        return "int8"
+    return requested
 
 
 def _is_usable_text(text: str) -> bool:
@@ -99,7 +121,7 @@ class FasterWhisperSTT(SpeechToText):
         compute_type = _compute_type_for_device(self.settings.stt_compute_type, device)
         logger.info("[stt] loading model=%s device=%s compute_type=%s language=%s", self.settings.stt_model_size, device, compute_type, self.settings.stt_language)
         self._model = WhisperModel(self.settings.stt_model_size, device=device, compute_type=compute_type)
-        logger.info("[stt] model_ready")
+        logger.info("[stt] model_ready device=%s compute_type=%s", device, compute_type)
         return self._model
 
     def _load_wake_model(self):
@@ -114,7 +136,7 @@ class FasterWhisperSTT(SpeechToText):
         size = self.settings.stt_wake_model_size or "tiny"
         logger.info("[stt] loading wake_model=%s device=%s compute_type=%s", size, device, compute_type)
         self._wake_model = WhisperModel(size, device=device, compute_type=compute_type)
-        logger.info("[stt] wake_model_ready")
+        logger.info("[stt] wake_model_ready device=%s compute_type=%s", device, compute_type)
         return self._wake_model
 
     async def warmup(self) -> None:
@@ -146,9 +168,11 @@ class FasterWhisperSTT(SpeechToText):
             "beam_size": 1 if wake_only else max(1, int(self.settings.stt_beam_size)),
             "best_of": 1 if wake_only else max(1, int(self.settings.stt_best_of)),
             "temperature": 0.0,
-            "vad_filter": False,
+            "vad_filter": bool(self.settings.stt_vad_filter),
             "without_timestamps": True,
         }
+        if self.settings.stt_vad_filter:
+            kwargs["vad_parameters"] = {"min_silence_duration_ms": max(100, int(self.settings.stt_vad_min_silence_ms))}
         if wake_only:
             kwargs["max_new_tokens"] = 6
         logger.debug("[stt] decode_kwargs=%s", {k: v for k, v in kwargs.items() if k != "initial_prompt"})
