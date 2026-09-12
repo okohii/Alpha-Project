@@ -14,6 +14,7 @@ HIGH_RISK_TOOLS = {
 
 MEDIUM_RISK_TOOLS = {
     "file_write",
+    "browser_click",
     "type_text",
     "press_key",
     "mouse_click",
