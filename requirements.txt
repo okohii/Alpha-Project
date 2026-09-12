@@ -26,3 +26,5 @@ anyio>=4.4,<5.0
 pywinauto>=0.6.8,<1.0; platform_system=="Windows"
 ultralytics>=8.2,<9.0
 opencv-python>=4.9,<5.0
+PySide6>=6.8,<7.0
+websocket-client>=1.8,<2.0
