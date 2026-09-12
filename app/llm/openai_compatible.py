@@ -64,6 +64,30 @@ class OpenAICompatibleProvider:
             normalized.append({"type": "function", "function": function})
         return normalized
 
+    @staticmethod
+    def _decode_response(response: httpx.Response) -> dict[str, Any]:
+        """Decode normal JSON and tolerate gateways that append SSE DONE framing."""
+        try:
+            return response.json()
+        except json.JSONDecodeError as exc:
+            text = response.text.strip()
+            # Some OpenAI-compatible gateways have returned a valid JSON object
+            # followed by an SSE-style terminator even with non-streaming calls.
+            # Recover only the first complete JSON object; never silently merge
+            # arbitrary trailing data into the response.
+            decoder = json.JSONDecoder()
+            try:
+                data, end = decoder.raw_decode(text)
+            except json.JSONDecodeError:
+                raise exc
+            trailing = text[end:].strip()
+            if trailing and trailing not in {"data: [DONE]", "[DONE]"}:
+                raise exc
+            if not isinstance(data, dict):
+                raise exc
+            logger.warning("[9ROUTER] tolerated trailing non-JSON framing after response")
+            return data
+
     async def complete(
         self,
         messages: list[LLMMessage],
@@ -77,6 +101,7 @@ class OpenAICompatibleProvider:
             "model": self.model,
             "messages": [self._message_payload(message) for message in messages],
             "temperature": temperature,
+            "stream": False,
         }
         if tools:
             payload["tools"] = self._tools_payload(tools)
@@ -86,13 +111,13 @@ class OpenAICompatibleProvider:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         url = f"{self.base_url}/chat/completions"
-        logger.info("[9ROUTER] POST %s model=%s tools=%s", url, self.model, bool(tools))
+        logger.info("[9ROUTER] POST %s model=%s tools=%s stream=false", url, self.model, bool(tools))
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(url, json=payload, headers=headers)
             if response.is_error:
                 raise OpenAICompatibleAPIError(response.status_code, url, response.text)
-            data = response.json()
+            data = self._decode_response(response)
 
         choices = data.get("choices") or []
         if not choices:
