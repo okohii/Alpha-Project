@@ -27,23 +27,21 @@ _WEATHER_EVIDENCE_TOOLS = frozenset(
     {"web_search", "browser_text", "browser_html", "browser_js", "read_ui", "verify_screen"}
 )
 
-# Ferramentas cujo sucesso já representa o efeito final que o usuário pediu.
-# Elas não precisam de uma segunda inferência do LLM para transformar o
-# resultado em uma frase curta. Não incluímos browser/computer/messaging:
-# nesses casos o ALPHA ainda precisa preservar a etapa de interpretação/
-# verificação para não transformar "executado" em "verificado".
 _FAST_POST_TOOL_TOOLS = frozenset({"memory_save", "file_write"})
 
-# Ações externas em que "a tool retornou success" prova somente EXECUTADO.
-# Exigem uma evidência explícita de pós-condição para virar VERIFICADO.
 _STRICT_VERIFICATION_TOOLS = frozenset(
     {
         "browser_click",
         "browser_js",
+        "browser_open",
         "browser_navigate",
         "open_app",
         "open_url",
+        "open_file",
+        "close_app",
+        "move_app",
         "mouse_click",
+        "mouse_scroll",
         "type_text",
         "press_key",
         "click_text",
@@ -186,11 +184,15 @@ class SerializedAgentCore(AgentCore):
 
         raw = execution.result if isinstance(execution.result, dict) else {}
         tool_name = execution.tool.split("(", 1)[0]
-        verified = bool(raw.get("verified") is True or raw.get("postcondition_verified") is True)
 
-        # Primeiro aplica o verificador genérico ao retorno. Isso confirma
-        # execução/resultado da própria ferramenta, mas não converte ação GUI
-        # em sucesso de objetivo.
+        # verify_screen só prova a meta quando o próprio resultado visual diz
+        # explicitamente que ela foi alcançada. `success=True` aqui significa
+        # apenas que a verificação foi executada, não que a meta foi atingida.
+        visual_verified = bool(raw.get("achieved") is True)
+        explicit_verified = bool(
+            raw.get("verified") is True or raw.get("postcondition_verified") is True
+        )
+
         tool_result_evidence = Evidence(
             kind=EvidenceKind.TOOL_RESULT,
             tool_result={
@@ -207,39 +209,46 @@ class SerializedAgentCore(AgentCore):
         if not execution.success:
             execution.verified = False
             execution.status = "failed"
+        elif tool_name == "verify_screen":
+            execution.verified = visual_verified
+            execution.status = "verified" if visual_verified else "executed_unverified"
         elif tool_name in _STRICT_VERIFICATION_TOOLS:
-            execution.verified = verified
-            execution.status = "verified" if verified else "executed_unverified"
+            execution.verified = explicit_verified
+            execution.status = "verified" if explicit_verified else "executed_unverified"
         else:
-            execution.verified = verification is VerificationResult.SUCCESS or verified
+            execution.verified = verification is VerificationResult.SUCCESS or explicit_verified
             execution.status = "verified" if execution.verified else "executed_unverified"
-
-        if execution.success and tool_name in _STRICT_VERIFICATION_TOOLS and not execution.verified:
-            self._emit(
-                EventType.honesty_gate,
-                {
-                    "claim": "action_success",
-                    "tool": tool_name,
-                    "executed": True,
-                    "verified": False,
-                },
-            )
         return message, execution
 
     @staticmethod
-    def _fast_post_tool_response(execution: ExecutionEvidence) -> str | None:
-        """Cria resposta final sem LLM quando a tool já encerra o objetivo.
+    def _correlate_visual_verification(
+        executions: list[ExecutionEvidence],
+    ) -> None:
+        visual_ok = any(
+            item.success
+            and item.tool.split("(", 1)[0] == "verify_screen"
+            and item.verified
+            for item in executions
+        )
+        if not visual_ok:
+            return
+        for item in executions:
+            if (
+                item.success
+                and item.tool.split("(", 1)[0] in _STRICT_VERIFICATION_TOOLS
+                and not item.verified
+            ):
+                item.verified = True
+                item.status = "verified"
 
-        O fast path só aceita sucesso real e ferramentas em uma allowlist
-        conservadora. Resultado de navegador/computador/mensageria nunca entra
-        aqui, evitando alegações de verificação sem uma etapa explícita.
-        """
+    @staticmethod
+    def _fast_post_tool_response(execution: ExecutionEvidence) -> str | None:
+        """Cria resposta final sem LLM quando a tool já encerra o objetivo."""
         tool_name = execution.tool.split("(", 1)[0]
         if not execution.success or tool_name not in _FAST_POST_TOOL_TOOLS:
             return None
         if not isinstance(execution.result, dict):
             return None
-
         if tool_name == "memory_save":
             return "Pronto, salvei isso na memória."
         if tool_name == "file_write":
@@ -257,7 +266,6 @@ class SerializedAgentCore(AgentCore):
         context: Any | None = None,
         expose_tools: bool = True,
     ) -> tuple[LLMResponse, list[LLMMessage]]:
-        """Executa o loop normal, com fast path determinístico pós-tool."""
         allowed_names = self._initial_tool_names(task, permissions) if expose_tools else set()
         evidence: list[ExecutionEvidence] = []
         new_messages: list[LLMMessage] = []
@@ -292,11 +300,10 @@ class SerializedAgentCore(AgentCore):
                 if execution is not None:
                     evidence.append(execution)
                     iteration_executions.append(execution)
+            self._correlate_visual_verification(evidence)
             messages.extend(tool_messages)
             new_messages.extend(tool_messages)
 
-            # Fast Post-Tool Response: uma única tool determinística bem-sucedida
-            # já produziu a evidência final. Evita o segundo round do LLM.
             if len(last_response.tool_calls) == 1 and len(iteration_executions) == 1:
                 fast_content = self._fast_post_tool_response(iteration_executions[0])
                 if fast_content is not None:
@@ -388,18 +395,16 @@ class SerializedAgentCore(AgentCore):
                     "do tempo a partir do conteúdo da página."
                 )
 
-        # Para ações estritas, sucesso sem pós-condição NÃO autoriza uma frase
-        # de conclusão. Isso impede que "cliquei/enviado/abri" seja inferido
-        # apenas do retorno da função.
         strict_unverified = [
             item for item in evidence
             if item.success
             and item.tool.split("(", 1)[0] in _STRICT_VERIFICATION_TOOLS
             and not item.verified
         ]
-        if strict_unverified and content and (self._claims_success(content) or any(
-            token in content.lower() for token in ("enviei", "mandei", "abri", "cliquei", "digitei")
-        )):
+        if strict_unverified and content and (
+            self._claims_success(content)
+            or any(token in content.lower() for token in ("enviei", "mandei", "abri", "cliquei", "digitei"))
+        ):
             self._emit(EventType.honesty_gate, {
                 "claim": "strict_action_success",
                 "tools": [item.tool for item in strict_unverified],
