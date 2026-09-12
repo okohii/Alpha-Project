@@ -1,12 +1,10 @@
 """Lançador do Avatar Overlay do ALPHA.
 
-Abre uma janela pywebview transparente e sem moldura (um "PNG flutuante")
-apontando para o backend FastAPI. O backend roda a sessão de voz contínua
-(``app/avatar/server.py``) e o avatar reflete os estados pelo EventBus.
-
-Toda a janela é apenas apresentação: nada de lógica/segurança aqui. A UI é
-um elemento flutuante sobre o desktop; o conteúdo fica restrito ao orbe do
-avatar e legendas mínimas.
+No Windows, o pywebview não oferece transparência nativa de janela. O avatar
+usa por isso uma janela frameless + Win32 color-key: a cor de fundo técnica é
+removida pela própria janela, deixando apenas o WebGL do Astral Core visível.
+Em plataformas que suportam transparência nativa, o parâmetro ``transparent``
+é usado normalmente.
 
 Uso:
     alpha avatar [--host 127.0.0.1] [--port 18081]
@@ -17,6 +15,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import logging
+import os
 import threading
 from typing import Any
 
@@ -24,6 +23,10 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 18081
 DEFAULT_WIDTH = 220
 DEFAULT_HEIGHT = 300
+
+# Cor técnica removida pela janela Windows. Deve ser exatamente a mesma
+# usada no canvas/HTML quando não há conteúdo desenhado.
+WINDOW_KEY_COLOR = (5, 6, 12)
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +66,10 @@ class AvatarApi:
 
 
 def _dwm_composition_enabled() -> bool:
-    """Transparência per-pixel depende de composição do DWM estar ativa."""
+    """Transparência por composição depende do DWM estar ativo."""
+    if os.name != "nt":
+        return True
     try:
-        import ctypes
-
         enabled = ctypes.c_int()
         hr = ctypes.windll.dwmapi.DwmIsCompositionEnabled(ctypes.byref(enabled))
         return hr == 0 and enabled.value != 0
@@ -74,57 +77,82 @@ def _dwm_composition_enabled() -> bool:
         return True
 
 
-def _enable_layered(window: Any) -> None:
-    """Aplica ``WS_EX_LAYERED`` no form WinForms e fundo transparente.
+def _apply_windows_color_key(window: Any) -> bool:
+    """Remove a cor de fundo da janela usando Win32 layered + color key.
 
-    O pywebview não aplica explicitamente esse estilo; sem ele, o WebView2
-    não compõe per-pixel e a área transparente do HTML aparece como o
-    ``BackColor`` do form (branco/padrão). Forçar ``WS_EX_LAYERED`` + 
-    ``BackColor = Transparent`` é o requisito para transparência real com
-    WebView2 em WinForms.
+    ``pywebview.transparent`` é documentado como não suportado no Windows.
+    Portanto não dependemos dele para o avatar: o form inteiro recebe
+    ``WS_EX_LAYERED`` e ``LWA_COLORKEY``. O canvas usa ``WINDOW_KEY_COLOR``
+    como clear color e essa cor passa a representar alpha=0 no desktop.
     """
+    if os.name != "nt":
+        return False
 
-    def _apply() -> None:
+    try:
+        form = window.native
+        if form is None:
+            return False
+
+        hwnd = form.Handle.ToInt32()
+        user32 = ctypes.windll.user32
+        GWL_EXSTYLE = -20
+        WS_EX_LAYERED = 0x00080000
+        LWA_COLORKEY = 0x00000001
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        SWP_FRAMECHANGED = 0x0020
+        HWND_TOP = 0
+
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
+        user32.SetWindowPos(
+            hwnd,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED,
+        )
+
+        r, g, b = WINDOW_KEY_COLOR
+        colorref = r | (g << 8) | (b << 16)
+        if not user32.SetLayeredWindowAttributes(hwnd, colorref, 0, LWA_COLORKEY):
+            return False
+
+        # O form precisa nascer com a mesma cor que será removida pelo key.
         try:
-            form = window.native
-            if form is None:
-                return
-            hwnd = form.Handle.ToInt32()
-            user32 = ctypes.windll.user32
-            GWL_EXSTYLE = -20
-            WS_EX_LAYERED = 0x00080000
-            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            if not (style & WS_EX_LAYERED):
-                user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
-                user32.SetWindowPos(
-                    hwnd, 0, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0020
-                )  # SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED
-        except Exception:  # noqa: BLE001 - nunca quebrar a janela
-            pass
-
-        # BackColor transparente: o cinza/branco que vaza atrás do WebView2
-        # some — o desktop aparece através das áreas alpha=0.
-        try:
-            form = window.native
-            if form is not None:
-                import clr
-
-                clr.AddReference("System.Drawing")
-                from System import Action
-                from System.Drawing import Color
-
-                def _transparent() -> None:
-                    form.BackColor = Color.Transparent
-
-                try:
-                    form.Invoke(Action(_transparent))
-                except Exception:  # noqa: BLE001
-                    form.BackColor = Color.Transparent
+            import clr
+            clr.AddReference("System.Drawing")
+            from System.Drawing import Color
+            form.BackColor = Color.FromArgb(r, g, b)
         except Exception:  # noqa: BLE001
             pass
 
-    window.events.before_show += _apply
-    window.events.loaded += _apply
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AVATAR] color-key Windows indisponível: %s", exc)
+        return False
+
+
+def _prepare_native_window(window: Any) -> None:
+    """Aplica o modo de transparência antes de exibir a janela."""
+    if os.name == "nt":
+        if not _apply_windows_color_key(window):
+            logger.warning("[AVATAR] fallback para janela opaca no Windows")
+        return
+
+    # macOS/Linux: pywebview pode suportar transparência nativa conforme o
+    # backend escolhido. Não fazemos hacks Win32 fora do Windows.
+    try:
+        form = window.native
+        if form is not None:
+            import clr
+            clr.AddReference("System.Drawing")
+            from System.Drawing import Color
+            form.BackColor = Color.Transparent
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def open_avatar(
@@ -134,7 +162,7 @@ def open_avatar(
     height: int = DEFAULT_HEIGHT,
     transparent: bool = True,
 ) -> int:
-    """Sobe o servidor e abre a janela transparente do avatar. Bloqueia até fechar."""
+    """Sobe o servidor e abre a janela do avatar. Bloqueia até fechar."""
     try:
         import webview
     except ModuleNotFoundError:
@@ -149,7 +177,7 @@ def open_avatar(
     server, _thread = start_server(host, port)
     url = f"http://{host}:{port}/avatar/"
 
-    if transparent and not _dwm_composition_enabled():
+    if transparent and os.name == "nt" and not _dwm_composition_enabled():
         logger.warning("[AVATAR] composição DWM desativada; usando janela opaca")
         transparent = False
 
@@ -160,26 +188,37 @@ def open_avatar(
         "width": width,
         "height": height,
         "frameless": True,
+        "shadow": False,
         "on_top": True,
         "js_api": api,
-        # Cor de pré-carregamento. Com transparência real o WebView2 usa
-        # DefaultBackgroundColor=Transparent; sem ela, evita branco.
+        "hidden": True,
         "background_color": "#05060c",
     }
-    if transparent:
+
+    # No Windows, não passamos transparent=True porque o próprio pywebview
+    # documenta essa opção como unsupported. Usamos color-key após criar a
+    # janela. Em outros sistemas, a transparência nativa pode ser usada.
+    if transparent and os.name != "nt":
         kwargs["transparent"] = True
 
     try:
         window = webview.create_window(**kwargs)
     except TypeError:
-        logger.warning("[AVATAR] transparência indisponível; abrindo opaco")
+        logger.warning("[AVATAR] transparência nativa indisponível; abrindo opaco")
         kwargs.pop("transparent", None)
-        kwargs["background_color"] = "#05060c"
         window = webview.create_window(**kwargs)
 
     api.bind_close(window.destroy)
-    if transparent:
-        _enable_layered(window)
+
+    def _on_loaded() -> None:
+        if transparent:
+            _prepare_native_window(window)
+        try:
+            window.show()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AVATAR] não foi possível exibir a janela: %s", exc)
+
+    window.events.loaded += _on_loaded
     window.events.closed += lambda: setattr(server, "should_exit", True)
 
     logger.info("[AVATAR] WebView created url=%s", url)
