@@ -131,7 +131,7 @@ class _WebSocketThread(threading.Thread):
 
 
 class NativeAlphaWindow(QWidget):
-    """Janela nativa compartilhada pelo chat overlay e pelo avatar."""
+    """Janela nativa compartilhada pelo chat e pelo avatar."""
 
     def __init__(self, *, mode: str, ws_url: str, width: int, height: int) -> None:
         super().__init__()
@@ -144,7 +144,7 @@ class NativeAlphaWindow(QWidget):
 
         self.setWindowTitle("ALPHA")
         self.resize(width, height)
-        self.setMinimumSize(280, 300) if mode == "chat" else self.setMinimumSize(240, 240)
+        self.setMinimumSize(420, 520) if mode == "chat" else self.setMinimumSize(240, 240)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -188,7 +188,6 @@ class NativeAlphaWindow(QWidget):
         self.core.setStyleSheet("background: transparent; border: none;")
         layout.addWidget(self.core, 1)
 
-        # HUD do avatar: somente texto/ícone, sem painel, borda ou fundo.
         self.status_overlay = QLabel(root)
         self.status_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_overlay.setStyleSheet(
@@ -211,36 +210,37 @@ class NativeAlphaWindow(QWidget):
         self.log_area = None
 
     def _build_chat_ui(self) -> None:
+        """Build a full chat surface without the Astral avatar/core."""
         root = QWidget(self)
-        root.setObjectName("root")
+        root.setObjectName("chatRoot")
         root.setGeometry(self.rect())
+        root.setStyleSheet("QWidget#chatRoot { background: #080a18; color: #e8f7ff; }")
         self.root = root
 
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(14, 10, 14, 14)
-        outer.setSpacing(5)
+        outer.setContentsMargins(18, 14, 18, 16)
+        outer.setSpacing(8)
 
         header = QHBoxLayout()
-        title = QLabel("ALPHA  ·  ASTRAL CORE")
-        title.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
-        self.state = QLabel("● Repouso")
+        title = QLabel("ALPHA")
+        title.setFont(QFont("Segoe UI", 13, QFont.Weight.DemiBold))
+        subtitle = QLabel("ASSISTENTE")
+        subtitle.setStyleSheet("color: #71899a; font-size: 9px; letter-spacing: 1px;")
+        self.state = QLabel("✦ Repouso")
         self.state.setStyleSheet("color: #66dfff; font-size: 11px;")
         close = QPushButton("×")
         close.setFixedSize(30, 28)
         close.clicked.connect(self.close)
         header.addWidget(title)
+        header.addWidget(subtitle)
         header.addStretch(1)
         header.addWidget(self.state)
         header.addWidget(close)
         outer.addLayout(header)
 
-        self.core = AstralCore(root)
-        self.core.setMinimumSize(240, 240)
-        self.core.setStyleSheet("background: #080a18; border: none;")
-        outer.addWidget(self.core, 1, Qt.AlignmentFlag.AlignCenter)
-
         self.activity = QLabel("Pronto")
-        self.activity.setStyleSheet("color: #c9e7f5; font-size: 11px; background: #080a18;")
+        self.activity.setStyleSheet("color: #9db8c8; font-size: 10px; background: #080a18;")
+        self.activity.setWordWrap(True)
         outer.addWidget(self.activity)
 
         self.log_area = QScrollArea()
@@ -250,17 +250,20 @@ class NativeAlphaWindow(QWidget):
         self.log_container = QWidget()
         self.log_container.setStyleSheet("background: #080a18;")
         self.log_layout = QVBoxLayout(self.log_container)
-        self.log_layout.setContentsMargins(2, 2, 2, 2)
+        self.log_layout.setContentsMargins(2, 6, 2, 6)
+        self.log_layout.setSpacing(8)
         self.log_layout.addStretch(1)
         self.log_area.setWidget(self.log_container)
-        self.log_area.setMaximumHeight(150)
-        outer.addWidget(self.log_area)
+        outer.addWidget(self.log_area, 1)
 
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.input = QLineEdit()
         self.input.setPlaceholderText("Fale com o ALPHA…")
+        self.input.setMinimumHeight(38)
         self.input.returnPressed.connect(self._send_chat)
         send = QPushButton("Enviar")
+        send.setMinimumHeight(38)
         send.clicked.connect(self._send_chat)
         row.addWidget(self.input, 1)
         row.addWidget(send)
@@ -312,18 +315,18 @@ class NativeAlphaWindow(QWidget):
             return
         label = QLabel(f"<b>{author}</b>  {text}")
         label.setWordWrap(True)
-        label.setStyleSheet("padding: 5px 7px; color: #ebf5fa; background: #080a18;")
+        label.setStyleSheet("padding: 8px 10px; color: #ebf5fa; background: #10152a; border-radius: 8px;")
         self.log_layout.insertWidget(max(0, self.log_layout.count() - 1), label)
         QTimer.singleShot(0, lambda: self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum()))
 
     def _set_state(self, state: str) -> None:
         state = state if state in _STATE_LABELS else "idle"
-        self.core.set_state(state)
         if self.mode == "chat":
             color = _STATE_COLORS[state]
             self.state.setStyleSheet(f"color: {color}; font-size: 11px;")
             self.state.setText(f"{_STATE_ICONS[state]} {_STATE_LABELS[state]}")
         else:
+            self.core.set_state(state)
             self._update_avatar_hud(state, self.activity.text() or _STATE_LABELS[state])
 
     def _update_avatar_hud(self, state: str, activity: str) -> None:
