@@ -42,7 +42,6 @@ def test_does_not_detect_normal_answer_as_tool_intent():
 
 
 def test_synthetic_tool_response_is_blocked_without_retry():
-    tools = [{"type": "function", "function": {"name": "web_search"}}]
     assert SerializedAgentCore._scrub_synthetic_tool_response(
         "<tool_response>web_search executada com sucesso</tool_response>"
     ) == "Não posso considerar uma ferramenta executada sem uma chamada nativa real."
@@ -127,3 +126,42 @@ def test_web_search_allows_weather_claim_to_reach_normal_honesty_gate(agent):
         "Encontrei a previsão do tempo para hoje.", evidence
     )
     assert result == "Encontrei a previsão do tempo para hoje."
+
+
+def test_memory_save_uses_fast_post_tool_response(agent):
+    execution = ExecutionEvidence(
+        action_id="1",
+        tool="memory_save",
+        arguments={"content": "x"},
+        executed_at="now",
+        success=True,
+        result={"saved": True},
+    )
+    assert SerializedAgentCore._fast_post_tool_response(execution) == (
+        "Pronto, salvei isso na memória."
+    )
+
+
+def test_failed_memory_save_does_not_use_fast_post_tool_response(agent):
+    execution = ExecutionEvidence(
+        action_id="1",
+        tool="memory_save",
+        arguments={"content": "x"},
+        executed_at="now",
+        success=False,
+        result={},
+        error="db error",
+    )
+    assert SerializedAgentCore._fast_post_tool_response(execution) is None
+
+
+def test_browser_actions_never_use_fast_post_tool_response(agent):
+    execution = ExecutionEvidence(
+        action_id="1",
+        tool="open_url",
+        arguments={"url": "https://example.test"},
+        executed_at="now",
+        success=True,
+        result={"url": "https://example.test"},
+    )
+    assert SerializedAgentCore._fast_post_tool_response(execution) is None
