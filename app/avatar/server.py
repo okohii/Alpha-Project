@@ -30,6 +30,8 @@ router = APIRouter(prefix="/avatar", tags=["avatar"])
 logger = logging.getLogger("app.avatar.server")
 UI_DIR = Path(__file__).parent / "ui"
 _CONFIRM_TIMEOUT = 180.0
+_CONFIRM_YES = {"sim", "sima", "pode", "permitir", "permite", "confirmo", "confirmar", "ok", "okay", "certo", "pode fazer", "pode clicar"}
+_CONFIRM_NO = {"nao", "não", "nega", "negar", "cancelar", "cancela", "não pode", "nao pode", "não", "pare", "parar"}
 _EXECUTION_EVENTS = {EventType.tool_started, EventType.tool_finished, EventType.tool_failed, EventType.skill_started, EventType.skill_finished, EventType.verification_started, EventType.verification_completed, EventType.task_step_completed, EventType.task_completed, EventType.task_failed, EventType.honesty_gate, EventType.textual_tool_call_blocked}
 _EXIT_WORDS = {"sair", "encerrar", "parar", "fechar"}
 
@@ -47,7 +49,6 @@ def _parse_confirmation_candidate(candidate: str) -> dict[str, str]:
 
 
 def _is_exit(text: str) -> bool:
-    """Backward-compatible exact exit-word check used by older callers/tests."""
     return normalize(text).strip(" .,!?;:") in _EXIT_WORDS
 
 
@@ -74,10 +75,33 @@ class AvatarSession:
             payload=await self._out.get()
             try:await self.websocket.send_json(payload)
             except (WebSocketDisconnect,RuntimeError):return
+    async def _listen_confirmation_voice(self,pipeline:VoicePipeline)->None:
+        """Listen for a short spoken confirmation without blocking the agent's permission future."""
+        deadline=asyncio.get_running_loop().time()+_CONFIRM_TIMEOUT
+        while not self.cancel_event.is_set() and asyncio.get_running_loop().time()<deadline:
+            try:path=await asyncio.to_thread(audio_io.record_microphone_vad,max_wait=8.0,silence_pad=0.35)
+            except audio_io.MicrophoneRecordingError:
+                return
+            if path is None:continue
+            try:result=await pipeline.process(path)
+            except Exception:continue
+            text=normalize(str(result.get("transcription") or "")).strip(" .,!?;:")
+            if not text:continue
+            if text in _CONFIRM_YES or any(text.startswith(word+" ") for word in _CONFIRM_YES):
+                await self._confirm_queue.put(True); return
+            if text in _CONFIRM_NO or any(text.startswith(word+" ") for word in _CONFIRM_NO):
+                await self._confirm_queue.put(False); return
     async def permission_request(self,candidate:str)->bool:
         display=_parse_confirmation_candidate(candidate);await self.push({"type":"confirmation","kind":display["kind"],"tool":display["tool"],"arguments":display["arguments"]})
+        if hasattr(self,"_confirmation_voice_task") and self._confirmation_voice_task is not None and not self._confirmation_voice_task.done():
+            self._confirmation_voice_task.cancel()
+        pipeline=getattr(self,"_pipeline",None)
+        self._confirmation_voice_task=asyncio.create_task(self._listen_confirmation_voice(pipeline)) if pipeline is not None else None
         try:return await asyncio.wait_for(self._confirm_queue.get(),timeout=_CONFIRM_TIMEOUT)
         except asyncio.TimeoutError:return False
+        finally:
+            task=getattr(self,"_confirmation_voice_task",None)
+            if task is not None and not task.done():task.cancel()
     async def receive_loop(self)->None:
         while not self.cancel_event.is_set():
             try:raw=await self.websocket.receive_json()
@@ -101,7 +125,7 @@ class AvatarSession:
         if not settings.wake_word_enabled:await self._set_interaction(True,"wake_word_disabled")
         else:await self._set_interaction(False,"waiting_for_wake_word")
         async with AsyncSessionLocal() as session:
-            agent=await build_agent(session,permission_prompt=self.permission_request,event_bus=self.event_bus,cancel_event=self.cancel_event);pipeline=VoicePipeline(event_bus=self.event_bus);carry:str|None=None
+            agent=await build_agent(session,permission_prompt=self.permission_request,event_bus=self.event_bus,cancel_event=self.cancel_event);pipeline=VoicePipeline(event_bus=self.event_bus);self._pipeline=pipeline;carry:str|None=None
             while not self.cancel_event.is_set():
                 if self._interaction and self._interaction.expired():self._interaction.expire();await self._set_interaction(False,"timeout")
                 text=carry;carry=None
@@ -152,7 +176,7 @@ class AvatarSession:
                 while not self.cancel_event.is_set():
                     raw=wav.readframes(chunk)
                     if not raw:break
-                    sample_count=len(raw)//width; samples=struct.unpack("<"+fmt*sample_count,raw)
+                    sample_count=len(raw)//width;samples=struct.unpack("<"+fmt*sample_count,raw)
                     if channels>1:samples=samples[::channels]
                     abs_values=[abs(x) for x in samples];peak=max(abs_values,default=0);rms=(sum(x*x for x in samples)/len(samples))**0.5 if samples else 0.0;max_sample=float((1<<(8*width-1))-1);level=min(1.0,rms/max_sample*2.2);peak_level=min(1.0,peak/max_sample)
                     self._out.put_nowait({"type":"speech_energy","level":level,"peak":peak_level});await asyncio.sleep(min(0.04,max(0.01,chunk/rate)))
@@ -175,9 +199,12 @@ async def avatar_ws(websocket:WebSocket)->None:
     finally:
         session.cancel_event.set()
         if session._voice_task is not None:session._voice_task.cancel()
+        confirmation_task=getattr(session,"_confirmation_voice_task",None)
+        if confirmation_task is not None:confirmation_task.cancel()
         for task in (receive,pump):task.cancel()
         await asyncio.gather(receive,pump,return_exceptions=True)
         if session._voice_task is not None:await asyncio.gather(session._voice_task,return_exceptions=True)
+        if confirmation_task is not None:await asyncio.gather(confirmation_task,return_exceptions=True)
 
 @router.get("/health")
 async def avatar_health()->dict[str,str]:return {"status":"ok","service":"avatar"}
