@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from app.agent.agent import AgentCore
+from app.agent.serialized import SerializedAgentCore
 from app.calendar.service import CalendarRepository, CalendarService
 from app.core.config import get_settings
 from app.llm.ollama import OllamaProvider
@@ -30,7 +30,7 @@ async def build_agent(
     permission_prompt: Callable[[str], Awaitable[bool]] | None = None,
     event_bus: Any | None = None,
     cancel_event: asyncio.Event | None = None,
-) -> AgentCore:
+) -> SerializedAgentCore:
     memory_repository = MemoryRepository(session)
     memory_service = MemoryService(memory_repository, LocalEmbeddingProvider())
 
@@ -109,16 +109,9 @@ async def build_agent(
         estrutural (NÃO por heurística de formato):
 
         1. Confirmação de action      → candidate inicia com ``SENSITIVE_PREFIX``
-           (tools sensíveis/arriscadas: ``"tool_name: {args_json}"``). O prefixo
-           é removido para exibição na interface e NÃO deve poluir o whitelist
-           de diretórios nem ser persistido no banco.
+           (tools sensíveis/arriscadas: ``"tool_name: {args_json}"``).
 
-        2. AccessDeniedError         → candidate é um caminho de filesystem
-           (ex.: ``C:/Users/foo/Downloads``). Só então é adicionado ao
-           whitelist de diretórios autorizados e persistido.
-
-        Nunca é o conteúdo/NUNCA o LLM que decide: a interface (handler) é a
-        única fonte de autorização.
+        2. AccessDeniedError         → candidate é um caminho de filesystem.
         """
         if permission_prompt is None:
             return False
@@ -143,7 +136,7 @@ async def build_agent(
         )
         return True
 
-    return AgentCore(
+    return SerializedAgentCore(
         llm_router=LLMRouter(local_provider=OllamaProvider()),
         tool_registry=tool_registry,
         memory_service=memory_service,
