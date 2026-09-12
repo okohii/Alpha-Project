@@ -8,8 +8,6 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
-  /* No Windows, o desktop.py remove esta cor com Win32 color-key. Manter a
-     mesma cor evita o "quadrado" atrás do WebGL quando o canvas tem alpha=0. */
   background-color: var(--window-key) !important;
   background: var(--window-key) !important;
   height: 100%;
@@ -20,7 +18,6 @@ html, body {
   -webkit-app-region: drag;
 }
 
-/* Modo sólido explícito para diagnóstico/compatibilidade. */
 body.solid {
   background-color: #05060c !important;
   background: #05060c !important;
@@ -35,7 +32,29 @@ body.solid {
   z-index: 0;
 }
 
-/* ── legenda ──────────────────────────────────────────── */
+#executionPanel {
+  position: fixed;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  width: min(92%, 360px);
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(10, 12, 24, 0.76);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+  backdrop-filter: blur(5px);
+  z-index: 9;
+  -webkit-app-region: no-drag;
+}
+#executionPanel[hidden] { display: none !important; }
+.execution-title { font-size: 9px; letter-spacing: .12em; color: var(--text-dim); margin-bottom: 3px; }
+.execution-item { display: flex; gap: 6px; align-items: center; min-height: 17px; }
+.execution-icon { width: 12px; text-align: center; }
+.execution-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 #caption {
   position: fixed;
   left: 50%;
@@ -61,7 +80,6 @@ body.solid {
 #caption[data-from="user"] { color: var(--text-dim); }
 #caption[hidden], #confirmChip[hidden] { display: none !important; }
 
-/* ── confirmação ──────────────────────────────────────── */
 #confirmChip {
   position: fixed;
   left: 50%;
@@ -87,7 +105,6 @@ body.solid {
 #btnApprove { background: #e1272c; color: #fff; }
 #btnDeny { background: rgba(255, 255, 255, 0.12); color: var(--text); }
 
-/* ── fechar (hover sutil) ─────────────────────────────── */
 #closeBtn {
   position: fixed;
   top: 6px;
