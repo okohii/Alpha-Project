@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -23,9 +24,12 @@ class TextToSpeech:
     async def synthesize(self, text: str, delivery: DeliveryProfile | None = None) -> Path:
         raise NotImplementedError
 
+    async def synthesize_stream(self, text: str, delivery: DeliveryProfile | None = None):
+        raise NotImplementedError
+
 
 class KokoroTTS(TextToSpeech):
-    """Kokoro-82M local com caminho otimizado para baixa latência."""
+    """Kokoro-82M local com síntese inteira e incremental por segmento."""
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -41,7 +45,6 @@ class KokoroTTS(TextToSpeech):
 
         try:
             import torch
-
             requested = str(self.settings.tts_device).lower().strip()
             if requested == "cuda" or (requested == "auto" and torch.cuda.is_available()):
                 self._device = "cuda"
@@ -75,44 +78,40 @@ class KokoroTTS(TextToSpeech):
                 "Arquivos do Kokoro não encontrados:\n" + "\n".join(f" - {path}" for path in missing_files)
             )
 
-    async def synthesize(self, text: str, delivery: DeliveryProfile | None = None) -> Path:
+    def _prepare(self, text: str, delivery: DeliveryProfile | None) -> tuple[DeliveryProfile, list[str], str]:
         if not text or not text.strip():
             raise TextToSpeechError("Não é possível sintetizar texto vazio.")
+        profile = delivery or DeliveryProfile(speed=self.settings.tts_speed)
+        prepared = self._delivery.prepare(text.strip())
+        segments = self._delivery.chunk(prepared, profile)
+        if not segments:
+            raise TextToSpeechError("Não é possível sintetizar texto vazio.")
+        return profile, segments, prepared
+
+    async def synthesize(self, text: str, delivery: DeliveryProfile | None = None) -> Path:
         try:
-            return await asyncio.to_thread(self._synthesize, text.strip(), delivery)
+            return await asyncio.to_thread(self._synthesize, text, delivery)
         except TextToSpeechError:
             raise
         except Exception as exc:
             raise TextToSpeechError(f"Falha na síntese Kokoro: {exc}") from exc
 
     def _synthesize(self, text: str, delivery: DeliveryProfile | None = None) -> Path:
-        profile = delivery or DeliveryProfile(speed=self.settings.tts_speed)
-        prepared = self._delivery.prepare(text)
-        segments = self._delivery.chunk(prepared, profile)
-        if not segments:
-            raise TextToSpeechError("Não é possível sintetizar texto vazio.")
-
+        profile, segments, _ = self._prepare(text, delivery)
         voice = profile.voice or self.voice
         temp_dir = Path(tempfile.mkdtemp(prefix="alpha-kokoro-"))
         output_path = temp_dir / "speech.wav"
-
         try:
-            # Um único segmento para respostas curtas evita overhead de múltiplas
-            # chamadas ao pipeline. Respostas longas continuam segmentadas.
-            call_text: str | list[str] = segments[0] if len(segments) == 1 else segments
-            generator = self._pipeline(call_text, voice=voice, speed=profile.speed)
+            generator = self._pipeline(segments[0] if len(segments) == 1 else segments, voice=voice, speed=profile.speed)
             audio_chunks: list[np.ndarray] = []
             for _, _, audio in generator:
-                if audio is None:
-                    continue
-                audio_array = np.asarray(audio)
-                if audio_array.size:
-                    audio_chunks.append(audio_array)
+                if audio is not None:
+                    audio_array = np.asarray(audio)
+                    if audio_array.size:
+                        audio_chunks.append(audio_array)
             if not audio_chunks:
                 raise TextToSpeechError("Kokoro não gerou nenhum áudio.")
-
-            full_audio = np.concatenate(audio_chunks)
-            sf.write(str(output_path), full_audio, self.sample_rate)
+            sf.write(str(output_path), np.concatenate(audio_chunks), self.sample_rate)
             if not output_path.exists() or output_path.stat().st_size == 0:
                 raise TextToSpeechError("Kokoro não criou um arquivo de áudio válido.")
             return output_path
@@ -120,3 +119,42 @@ class KokoroTTS(TextToSpeech):
             raise
         except Exception as exc:
             raise TextToSpeechError(f"Erro durante a geração do áudio pelo Kokoro: {exc}") from exc
+
+    async def synthesize_stream(self, text: str, delivery: DeliveryProfile | None = None):
+        """Gera e entrega cada segmento sem esperar a resposta inteira."""
+        profile, segments, _ = self._prepare(text, delivery)
+        voice = profile.voice or self.voice
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[Path | BaseException | None] = asyncio.Queue(maxsize=2)
+
+        def worker() -> None:
+            temp_dir = Path(tempfile.mkdtemp(prefix="alpha-kokoro-stream-"))
+            try:
+                for index, segment in enumerate(segments):
+                    generator = self._pipeline(segment, voice=voice, speed=profile.speed)
+                    audio_chunks: list[np.ndarray] = []
+                    for _, _, audio in generator:
+                        if audio is None:
+                            continue
+                        audio_array = np.asarray(audio)
+                        if audio_array.size:
+                            audio_chunks.append(audio_array)
+                    if not audio_chunks:
+                        raise TextToSpeechError(f"Kokoro não gerou áudio para o segmento {index + 1}.")
+                    path = temp_dir / f"chunk_{index:03d}.wav"
+                    sf.write(str(path), np.concatenate(audio_chunks), self.sample_rate)
+                    asyncio.run_coroutine_threadsafe(queue.put(path), loop).result()
+            except BaseException as exc:
+                asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
+            finally:
+                asyncio.run_coroutine_threadsafe(queue.put(None), loop).result()
+
+        thread = threading.Thread(target=worker, name="alpha-kokoro-stream", daemon=True)
+        thread.start()
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            yield item
