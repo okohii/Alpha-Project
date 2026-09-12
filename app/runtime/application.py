@@ -6,7 +6,9 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from app.agent.planner import Planner
 from app.agent.serialized import SerializedAgentCore
+from app.assistant.facilitator import AssistantFacilitator
 from app.calendar.service import CalendarRepository, CalendarService
 from app.core.config import get_settings
 from app.llm.configured_ollama import ConfiguredOllamaProvider
@@ -118,6 +120,9 @@ async def build_agent(
         )
         return True
 
+    facilitator = AssistantFacilitator(skill_registry=skill_registry)
+    planner = Planner()
+
     return SerializedAgentCore(
         llm_router=LLMRouter(local_provider=ConfiguredOllamaProvider()),
         tool_registry=tool_registry,
@@ -129,4 +134,6 @@ async def build_agent(
         event_bus=event_bus,
         cancel_event=cancel_event,
         skill_registry=skill_registry,
+        facilitator=facilitator,
+        planner=planner,
     )
