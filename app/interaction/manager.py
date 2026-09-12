@@ -65,15 +65,13 @@ class InteractionManager:
         self.last_activity = time.monotonic()
         command = (command or "").strip(" .,!?;:\n\t")
         if not command:
-            return InteractionDecision(
-                False,
-                activated=True,
-                command="",
-                wake_word=find_wake_word(raw, self._wake_words),
-                reason="wake_word_only",
-            )
-        return InteractionDecision(True, activated=True, command=command,
-                                  wake_word=find_wake_word(raw, self._wake_words), reason="wake_word")
+            return InteractionDecision(False, activated=True, command="", wake_word=find_wake_word(raw, self._wake_words), reason="wake_word_only")
+        return InteractionDecision(True, activated=True, command=command, wake_word=find_wake_word(raw, self._wake_words), reason="wake_word")
+
+    def touch_activity(self) -> None:
+        """Restart the inactivity window after a completed interaction turn."""
+        if self.active:
+            self.last_activity = time.monotonic()
 
     def expired(self, now: float | None = None) -> bool:
         if not self.enabled or not self.active:
