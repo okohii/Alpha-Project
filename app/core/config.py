@@ -53,13 +53,19 @@ class Settings(BaseSettings):
     allow_cloud_llm: bool = True
     allow_web: bool = True
 
+    # Perfil de inferência local com foco em comandos curtos e baixa latência.
+    llm_temperature: float = 0.15
+    llm_num_ctx: int = 8192
+    llm_num_predict: int = 256
+    llm_num_predict_tool: int = 128
+    llm_keep_alive: str = "10m"
+
     stt_enabled: bool = True
     stt_model_size: str = "small"
     stt_language: str = "pt"
     stt_device: str = "auto"
     stt_compute_type: str = "auto"
     stt_initial_prompt: str = ""
-    # Decodificação low-latency para comandos curtos.
     stt_beam_size: int = 1
     stt_best_of: int = 1
     stt_temperature: float = 0.0
@@ -75,7 +81,6 @@ class Settings(BaseSettings):
     tts_device: str = "auto"
     tts_streaming: bool = True
 
-    # Camada de expressividade vocal (emoção determinística sobre o Kokoro).
     tts_emotion_enabled: bool = True
     tts_default_emotion: str = "neutral"
     tts_emotion_max_intensity: float = 1.0
@@ -86,6 +91,7 @@ class Settings(BaseSettings):
     memory_relevance_min_score: float = 0.12
     agent_max_tool_iterations: int = 8
     agent_tool_timeout_seconds: float = 60.0
+    agent_history_limit: int = 12
 
     agent_tool_selection: bool = True
     agent_tool_selection_min_confidence: int = 1
