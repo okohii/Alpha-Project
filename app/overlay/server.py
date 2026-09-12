@@ -85,6 +85,17 @@ def _execution_payload(event: SystemEvent) -> dict[str, Any]:
     }
 
 
+def _text_payload(event: SystemEvent) -> dict[str, Any]:
+    payload = dict(event.payload or {})
+    text = payload.get("content") or payload.get("text") or payload.get("preview") or ""
+    return {
+        "type": "caption",
+        "from": "user" if event.type is EventType.user_message else "assistant",
+        "text": str(text),
+        "event": event.type.value,
+    }
+
+
 def _parse_confirmation_candidate(candidate: str) -> dict[str, str]:
     """Extrai tool + argumentos legíveis de um candidate de confirmação."""
     if candidate.startswith(SENSITIVE_PREFIX):
@@ -147,7 +158,12 @@ class _OverlaySession:
             if event.type in TOOL_EVENTS or (
                 event.type in TEXT_EVENTS and event.type is not EventType.user_message
             ):
-                await self.send(_serialize_event(event))
+                if event.type in TEXT_EVENTS:
+                    await self.send(_text_payload(event))
+                else:
+                    await self.send(_serialize_event(event))
+            elif event.type is EventType.user_message:
+                await self.send(_text_payload(event))
             elif event.type is EventType.memory_created:
                 await self.send(_serialize_event(event))
             elif event.type in TERMINAL_EVENTS:
@@ -184,13 +200,13 @@ async def _handle_chat(
         cancel_event=overlay.cancel_event,
     )
     if stream:
-        result = None
         async for _ in agent.chat_stream(message, conversation_id=overlay.conversation_id):
             pass
     else:
         result = await agent.chat(message, conversation_id=overlay.conversation_id)
-    if result and result.get("conversation_id"):
-        overlay.conversation_id = result["conversation_id"]
+        if result and result.get("conversation_id"):
+            overlay.conversation_id = result["conversation_id"]
+        return
 
 
 async def _handle_voice(overlay: _OverlaySession, raw: dict[str, Any]) -> None:
