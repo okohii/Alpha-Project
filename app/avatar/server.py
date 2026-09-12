@@ -18,6 +18,7 @@ from app.core.config import get_settings
 from app.core.events import EventBus, EventType, SystemEvent
 from app.db.session import AsyncSessionLocal
 from app.interaction import InteractionManager
+from app.perception.wakeword import normalize
 from app.runtime import build_agent
 from app.security import SENSITIVE_PREFIX
 from app.speech import audio_io
@@ -30,12 +31,12 @@ logger = logging.getLogger("app.avatar.server")
 UI_DIR = Path(__file__).parent / "ui"
 _CONFIRM_TIMEOUT = 180.0
 _EXECUTION_EVENTS = {EventType.tool_started, EventType.tool_finished, EventType.tool_failed, EventType.skill_started, EventType.skill_finished, EventType.verification_started, EventType.verification_completed, EventType.task_step_completed, EventType.task_completed, EventType.task_failed, EventType.honesty_gate, EventType.textual_tool_call_blocked}
+_EXIT_WORDS = {"sair", "encerrar", "parar", "fechar"}
 
 
 class AvatarWSRenderer:
     def __init__(self, out: asyncio.Queue[dict[str, Any]]) -> None: self._out = out
-    def show(self, command: AvatarCommand) -> None:
-        self._out.put_nowait({"type":"state","state":command.state.value,"animation":command.animation,"expression":command.expression,"emotion":command.emotion,"idle_after_ms":command.idle_after_ms})
+    def show(self, command: AvatarCommand) -> None: self._out.put_nowait({"type":"state","state":command.state.value,"animation":command.animation,"expression":command.expression,"emotion":command.emotion,"idle_after_ms":command.idle_after_ms})
 
 
 def _parse_confirmation_candidate(candidate: str) -> dict[str, str]:
@@ -43,6 +44,11 @@ def _parse_confirmation_candidate(candidate: str) -> dict[str, str]:
         rest=candidate[len(SENSITIVE_PREFIX):]; tool_name,sep,args=rest.partition(": ")
         return {"kind":"action","tool":tool_name.strip() if sep else rest.strip(),"arguments":args.strip() if sep else ""}
     return {"kind":"path","tool":"permissão de acesso","arguments":candidate}
+
+
+def _is_exit(text: str) -> bool:
+    """Backward-compatible exact exit-word check used by older callers/tests."""
+    return normalize(text).strip(" .,!?;:") in _EXIT_WORDS
 
 
 def _execution_payload(event: SystemEvent) -> dict[str, Any]:
@@ -55,7 +61,7 @@ class AvatarSession:
     def __init__(self, websocket: WebSocket) -> None:
         self.websocket=websocket; self.event_bus=EventBus(); self._out:asyncio.Queue[dict[str,Any]]=asyncio.Queue(); self.avatar=AvatarController(renderer=AvatarWSRenderer(self._out),mapping=AnimationMapping()); self.avatar.subscribe(self.event_bus); self.event_bus.subscribe_all(self._forward_agent_event); self._confirm_queue:asyncio.Queue[bool]=asyncio.Queue(); self.cancel_event=asyncio.Event(); self._voice_task:asyncio.Task[Any]|None=None; self.conversation_id:str|None=None; self._interaction:InteractionManager|None=None
     @property
-    def state(self)->str: return self.avatar.state.value
+    def state(self)->str:return self.avatar.state.value
     def _forward_agent_event(self,event:SystemEvent)->None:
         if event.type in _EXECUTION_EVENTS:
             try:self._out.put_nowait(_execution_payload(event))
@@ -69,7 +75,7 @@ class AvatarSession:
             try:await self.websocket.send_json(payload)
             except (WebSocketDisconnect,RuntimeError):return
     async def permission_request(self,candidate:str)->bool:
-        display=_parse_confirmation_candidate(candidate); await self.push({"type":"confirmation","kind":display["kind"],"tool":display["tool"],"arguments":display["arguments"]})
+        display=_parse_confirmation_candidate(candidate);await self.push({"type":"confirmation","kind":display["kind"],"tool":display["tool"],"arguments":display["arguments"]})
         try:return await asyncio.wait_for(self._confirm_queue.get(),timeout=_CONFIRM_TIMEOUT)
         except asyncio.TimeoutError:return False
     async def receive_loop(self)->None:
@@ -95,7 +101,7 @@ class AvatarSession:
         if not settings.wake_word_enabled:await self._set_interaction(True,"wake_word_disabled")
         else:await self._set_interaction(False,"waiting_for_wake_word")
         async with AsyncSessionLocal() as session:
-            agent=await build_agent(session,permission_prompt=self.permission_request,event_bus=self.event_bus,cancel_event=self.cancel_event); pipeline=VoicePipeline(event_bus=self.event_bus); carry:str|None=None
+            agent=await build_agent(session,permission_prompt=self.permission_request,event_bus=self.event_bus,cancel_event=self.cancel_event);pipeline=VoicePipeline(event_bus=self.event_bus);carry:str|None=None
             while not self.cancel_event.is_set():
                 if self._interaction and self._interaction.expired():self._interaction.expire();await self._set_interaction(False,"timeout")
                 text=carry;carry=None
@@ -127,9 +133,9 @@ class AvatarSession:
         audio_path=Path(result["audio_path"])
         try:player,frame_rate,n_frames=await asyncio.to_thread(audio_io.play_wav_async,audio_path)
         except audio_io.AudioPlaybackError as exc:await self.push({"type":"error","message":f"áudio indisponível: {exc}"});return None
-        speech_started=asyncio.Event();abort=threading.Event();loop=asyncio.get_running_loop();recorder=asyncio.create_task(self._capture_onset(pipeline,speech_started,abort,loop));energy_task=asyncio.create_task(self._emit_speech_energy(audio_path,n_frames/frame_rate if frame_rate else 0.0));duration=n_frames/frame_rate if frame_rate else 0.0;playback_done=asyncio.create_task(asyncio.sleep(duration+0.25));started_wait=asyncio.create_task(speech_started.wait())
+        speech_started=asyncio.Event();abort=threading.Event();loop=asyncio.get_running_loop();recorder=asyncio.create_task(self._capture_onset(pipeline,speech_started,abort,loop));energy_task=asyncio.create_task(self._emit_speech_energy(audio_path));duration=n_frames/frame_rate if frame_rate else 0.0;playback_done=asyncio.create_task(asyncio.sleep(duration+0.25));started_wait=asyncio.create_task(speech_started.wait())
         await asyncio.wait({playback_done,started_wait},return_when=asyncio.FIRST_COMPLETED)
-        if speech_started.is_set():await asyncio.to_thread(audio_io.stop_wav_async,player);playback_done.cancel();energy_task.cancel();
+        if speech_started.is_set():await asyncio.to_thread(audio_io.stop_wav_async,player);playback_done.cancel();energy_task.cancel()
         else:started_wait.cancel();abort.set();energy_task.cancel()
         if speech_started.is_set():
             try:return await recorder
@@ -137,17 +143,18 @@ class AvatarSession:
         try:await recorder
         except Exception:pass
         await asyncio.to_thread(audio_io.stop_wav_async,player);return None
-    async def _emit_speech_energy(self,audio_path:Path,duration:float)->None:
+    async def _emit_speech_energy(self,audio_path:Path)->None:
         try:
             with wave.open(str(audio_path),"rb") as wav:
-                rate=wav.getframerate();width=wav.getsampwidth();chunk=max(1,int(rate*0.04))
+                rate=wav.getframerate();width=wav.getsampwidth();channels=wav.getnchannels();chunk=max(1,int(rate*0.04))
+                if width not in (1,2,4):return
+                fmt={1:"b",2:"h",4:"i"}[width]
                 while not self.cancel_event.is_set():
                     raw=wav.readframes(chunk)
                     if not raw:break
-                    samples=struct.unpack("<" + {1:"b",2:"h",4:"i"}.get(width,"h")*(len(raw)//width),raw) if width in (1,2,4) else ()
-                    if samples:
-                        abs_values=[abs(x) for x in samples]; peak=max(abs_values); rms=(sum(x*x for x in samples)/len(samples))**0.5; max_sample=float((1<<(8*width-1))-1); level=min(1.0,rms/max_sample*2.2); peak_level=min(1.0,peak/max_sample)
-                    else:level=peak_level=0.0
+                    sample_count=len(raw)//width; samples=struct.unpack("<"+fmt*sample_count,raw)
+                    if channels>1:samples=samples[::channels]
+                    abs_values=[abs(x) for x in samples];peak=max(abs_values,default=0);rms=(sum(x*x for x in samples)/len(samples))**0.5 if samples else 0.0;max_sample=float((1<<(8*width-1))-1);level=min(1.0,rms/max_sample*2.2);peak_level=min(1.0,peak/max_sample)
                     self._out.put_nowait({"type":"speech_energy","level":level,"peak":peak_level});await asyncio.sleep(min(0.04,max(0.01,chunk/rate)))
         except Exception:logger.debug("[avatar] speech energy indisponível",exc_info=True)
         finally:
@@ -171,7 +178,6 @@ async def avatar_ws(websocket:WebSocket)->None:
         for task in (receive,pump):task.cancel()
         await asyncio.gather(receive,pump,return_exceptions=True)
         if session._voice_task is not None:await asyncio.gather(session._voice_task,return_exceptions=True)
-
 
 @router.get("/health")
 async def avatar_health()->dict[str,str]:return {"status":"ok","service":"avatar"}
