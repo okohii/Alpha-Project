@@ -128,8 +128,7 @@ class AvatarSession:
                 await self._confirm_queue.put(False)
                 return
 
-    async def _listen_for_interruption(self, pipeline: VoicePipeline, max_wait: float) -> str | None:
-        """Listen during TTS and return a usable user utterance as soon as one is decoded."""
+    async def _listen_for_interruption(self, pipeline: VoicePipeline, max_wait: float, on_speech_start: Any) -> str | None:
         try:
             path = await asyncio.to_thread(
                 audio_io.record_microphone_vad,
@@ -138,6 +137,7 @@ class AvatarSession:
                 silence_pad=0.30,
                 min_speech_duration=0.25,
                 speech_confirm_frames=2,
+                on_speech_start=on_speech_start,
                 abort_event=self._interrupt_abort,
             )
         except audio_io.MicrophoneRecordingError:
@@ -295,20 +295,39 @@ class AvatarSession:
         await self.push({"type": "state", "state": "speaking", "animation": "speak", "expression": None, "emotion": emotion.to_dict() if emotion else None, "idle_after_ms": max(320, int(duration * 1000))})
         energy_task = asyncio.create_task(self._emit_speech_energy(audio_path))
         self._interrupt_abort.clear()
-        self._interruption_task = asyncio.create_task(self._listen_for_interruption(pipeline, duration + 0.5))
-        interrupted_text: str | None = None
+        playback_interrupted = threading.Event()
+        interruption_capture_done = asyncio.Event()
+
+        def on_speech_start() -> None:
+            if playback_interrupted.is_set():
+                return
+            playback_interrupted.set()
+            logger.info("[avatar] user speech detected during TTS; stopping playback")
+            try:
+                audio_io.stop_wav_async(player)
+            except Exception:
+                logger.debug("[avatar] failed to stop TTS on speech start", exc_info=True)
+
+        self._interruption_task = asyncio.create_task(self._listen_for_interruption(pipeline, duration + 1.0, on_speech_start))
         try:
-            done, _ = await asyncio.wait({self._interruption_task, asyncio.create_task(asyncio.sleep(duration + 0.25))}, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                if task is self._interruption_task:
-                    interrupted_text = task.result()
-                    if interrupted_text:
-                        logger.info("[avatar] TTS interrompido por fala: %r", interrupted_text)
-                        await asyncio.to_thread(audio_io.stop_wav_async, player)
-                        break
-            if interrupted_text:
-                return interrupted_text
-            await asyncio.sleep(0)
+            playback_wait = asyncio.create_task(asyncio.sleep(duration + 0.25))
+            done, _ = await asyncio.wait({self._interruption_task, playback_wait}, return_when=asyncio.FIRST_COMPLETED)
+            if self._interruption_task in done:
+                interrupted_text = self._interruption_task.result()
+                if interrupted_text:
+                    return interrupted_text
+                # If capture ended without usable text, let normal playback timing finish.
+                if not playback_wait.done():
+                    await playback_wait
+            else:
+                # TTS finished. Keep the interruption listener alive briefly so speech
+                # immediately after the final syllable can still be captured.
+                try:
+                    interrupted_text = await asyncio.wait_for(self._interruption_task, timeout=0.45)
+                except asyncio.TimeoutError:
+                    interrupted_text = None
+                if interrupted_text:
+                    return interrupted_text
         finally:
             self._interrupt_abort.set()
             if self._interruption_task is not None and not self._interruption_task.done():
@@ -321,7 +340,7 @@ class AvatarSession:
                 await self.push({"type": "state", "state": "listening", "animation": "idle", "expression": None, "emotion": None, "idle_after_ms": 0})
                 if self._interaction:
                     self._interaction.touch_activity()
-        return interrupted_text
+        return None
 
     async def _emit_speech_energy(self, audio_path: Path) -> None:
         try:
