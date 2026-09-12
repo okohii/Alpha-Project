@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     stt_device: str = "auto"
     stt_compute_type: str = "auto"
     stt_initial_prompt: str = ""
+    # Decodificação low-latency para comandos curtos.
+    stt_beam_size: int = 1
+    stt_best_of: int = 1
+    stt_temperature: float = 0.0
+    stt_vad_filter: bool = False
+    stt_vad_min_silence_ms: int = 300
 
     wake_word_enabled: bool = False
     wake_words: str = "alpha"
@@ -66,6 +72,8 @@ class Settings(BaseSettings):
     tts_enabled: bool = True
     tts_voice: str = ""
     tts_speed: float = 1.0
+    tts_device: str = "auto"
+    tts_streaming: bool = True
 
     # Camada de expressividade vocal (emoção determinística sobre o Kokoro).
     tts_emotion_enabled: bool = True
@@ -75,27 +83,13 @@ class Settings(BaseSettings):
 
     memory_min_importance: float = 0.70
     rag_top_k: int = 5
-    # Relevância mínima (score híbrido embedding+lexical, 0..1) para uma memória
-    # virar contexto operacional do agente. Abaixo disso, memória não entra:
-    # evita que registros irrelevantes contaminem a resposta com ações/sugestões.
     memory_relevance_min_score: float = 0.12
     agent_max_tool_iterations: int = 8
-    # Timeout por execução de ferramenta: evita que uma tool travada
-    # segure o turno do agente indefinidamente.
     agent_tool_timeout_seconds: float = 60.0
 
-    # Seleção de ferramentas por Skill: expõe apenas as ferramentas da(s)
-    # skill(s) relacionada(s) ao pedido, em vez de todo o catálogo.
     agent_tool_selection: bool = True
-    # Confiança mínima (nº de keywords na descrição) para uma skill ser
-    # selecionada. Abaixo do limiar, cai no fallback seguro.
     agent_tool_selection_min_confidence: int = 1
-    # Autoriza por padrão ferramentas de escrita (escrever arquivos, teclado,
-    # clique, automação) mesmo sem interface de confirmação interativa.
-    # Por padrão, sem handler de confirmação o Agent só executa 'read'.
     agent_allow_write_default: bool = False
-    # Sem interface de confirmação (ex.: API), ferramentas sensíveis ficam
-    # negadas por padrão; habilite apenas se quiser autorização automática.
     agent_auto_approve_sensitive: bool = False
     agent_tool_result_strict: bool = True
     agent_require_tool_verification: bool = False
@@ -124,7 +118,6 @@ class Settings(BaseSettings):
 
     use_sqlite_for_tests: bool = False
 
-    # Overlay Desktop
     overlay_host: str = "127.0.0.1"
     overlay_port: int = 18080
 
