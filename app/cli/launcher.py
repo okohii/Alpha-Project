@@ -41,10 +41,36 @@ def _run_macros() -> int:
     return 0
 
 
+def _quit_qt() -> bool:
+    """Encerra a UI Qt sem lançar KeyboardInterrupt dentro de callbacks Qt."""
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is None:
+            return False
+
+        # Fechar a janela primeiro garante que NativeAlphaWindow.closeEvent()
+        # pare o WebSocket e solicite o encerramento do backend local.
+        for window in list(app.topLevelWidgets()):
+            try:
+                window.close()
+            except Exception:
+                pass
+        app.quit()
+        return True
+    except Exception:
+        return False
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
 
     def _stop(signum: int, frame: object) -> None:
+        # SIGINT durante QTimer callbacks não deve virar KeyboardInterrupt dentro
+        # do Qt (isso gerava traceback apontando para _drain_events()).
+        if args.mode in {"chat", None} and _quit_qt():
+            return
         raise KeyboardInterrupt
 
     try:
