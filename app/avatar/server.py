@@ -18,7 +18,7 @@ from app.core.config import get_settings
 from app.core.events import EventBus, EventType, SystemEvent
 from app.db.session import AsyncSessionLocal
 from app.interaction import InteractionManager
-from app.perception.wakeword import find_wake_word, normalize
+from app.perception.wakeword import find_wake_word, normalize, strip_wake_word
 from app.runtime import build_agent
 from app.security import SENSITIVE_PREFIX
 from app.speech import audio_io
@@ -214,12 +214,17 @@ class AvatarSession:
             await self._set_interaction(True, "wake_word_disabled")
         else:
             await self._set_interaction(False, "waiting_for_wake_word")
-        async with AsyncSessionLocal() as session:
-            agent = await build_agent(session, permission_prompt=self.permission_request, event_bus=self.event_bus, cancel_event=self.cancel_event)
-            pipeline = VoicePipeline(event_bus=self.event_bus)
-            self._pipeline = pipeline
+        pipeline = VoicePipeline(event_bus=self.event_bus)
+        self._pipeline = pipeline
+        try:
             await pipeline.warmup(wake_word=settings.wake_word_enabled, tts=settings.tts_enabled)
-            carry: str | None = None
+        except Exception as exc:
+            logger.exception("[avatar] voice warmup failed")
+            await self.push({"type": "error", "message": f"falha ao preparar voz: {exc}"})
+            return
+        carry: str | None = None
+        agent = None
+        async with AsyncSessionLocal() as session:
             while not self.cancel_event.is_set():
                 if self._interaction and self._interaction.expired():
                     self._interaction.expire()
@@ -236,30 +241,64 @@ class AvatarSession:
                     if path is None:
                         continue
                     if settings.wake_word_enabled:
-                        wake_result = await pipeline.process_wake(path)
+                        try:
+                            wake_result = await pipeline.process_wake(path)
+                        except Exception as exc:
+                            logger.exception("[avatar] wake transcription failed")
+                            await self.push({"type": "error", "message": f"falha no detector de voz: {exc}"})
+                            continue
                         wake_text = (wake_result.get("transcription") or "").strip()
                         wake_confidence = float(wake_result.get("confidence") or 0.0)
                         wake_suspicious = bool(wake_result.get("is_suspicious"))
-                        if (
-                            wake_suspicious
-                            or not wake_text
-                            or find_wake_word(wake_text, settings.wake_words) is None
-                            or wake_confidence < 0.30
-                        ):
+                        wake_word = find_wake_word(wake_text, settings.wake_words)
+                        if wake_suspicious or not wake_text or wake_word is None or wake_confidence < 0.30:
                             logger.debug("[avatar] wake rejected text=%r confidence=%.3f suspicious=%s", wake_text, wake_confidence, wake_suspicious)
                             continue
-                        # Só aqui pagamos o custo do modelo completo, preservando
-                        # a melhor transcrição do comando depois da ativação.
-                        result = await pipeline.process(path)
+
+                        # O wake word já foi comprovado. Mostrar o avatar imediatamente,
+                        # antes de qualquer inferência mais pesada.
+                        await self._set_interaction(True, "wake_word")
+                        _, wake_command = strip_wake_word(wake_text, settings.wake_words)
+                        wake_command = (wake_command or "").strip(" .,!?;:\n\t")
+                        logger.info("[avatar] wake accepted word=%r confidence=%.3f command_hint=%r", wake_word, wake_confidence, wake_command)
+
+                        # Se o usuário só chamou o ALPHA ("Alpha" / "Alfa"),
+                        # NÃO rode o small CUDA no mesmo áudio. Apenas ative a
+                        # interação e volte imediatamente a escutar o próximo turno.
+                        if not wake_command:
+                            continue
+
+                        # Há indício de comando no mesmo áudio; agora sim pagamos
+                        # o custo da transcrição completa no modelo small.
+                        try:
+                            result = await pipeline.process(path)
+                        except Exception as exc:
+                            logger.exception("[avatar] full transcription failed; using wake command hint")
+                            await self.push({"type": "caption", "from": "user", "text": wake_command})
+                            text = wake_command
+                        else:
+                            text = (result.get("transcription") or "").strip()
+                            confidence = float(result.get("confidence") or 0.0)
+                            suspicious = bool(result.get("is_suspicious"))
+                            normalized = normalize(text).strip(" .,!?;:")
+                            if suspicious or not normalized or len(normalized) < 2:
+                                logger.warning("[avatar] transcription rejected text=%r confidence=%.3f suspicious=%s", text, confidence, suspicious)
+                                # O detector de wake já forneceu um comando plausível;
+                                # usar esse hint é melhor que perder o turno inteiro.
+                                text = wake_command
                     else:
-                        result = await pipeline.process(path)
-                    text = (result.get("transcription") or "").strip()
-                    confidence = float(result.get("confidence") or 0.0)
-                    suspicious = bool(result.get("is_suspicious"))
-                    normalized = normalize(text).strip(" .,!?;:")
-                    if suspicious or not normalized or len(normalized) < 2:
-                        logger.warning("[avatar] transcription rejected text=%r confidence=%.3f suspicious=%s", text, confidence, suspicious)
-                        continue
+                        try:
+                            result = await pipeline.process(path)
+                        except Exception as exc:
+                            await self.push({"type": "error", "message": f"falha na transcrição: {exc}"})
+                            continue
+                        text = (result.get("transcription") or "").strip()
+                        confidence = float(result.get("confidence") or 0.0)
+                        suspicious = bool(result.get("is_suspicious"))
+                        normalized = normalize(text).strip(" .,!?;:")
+                        if suspicious or not normalized or len(normalized) < 2:
+                            logger.warning("[avatar] transcription rejected text=%r confidence=%.3f suspicious=%s", text, confidence, suspicious)
+                            continue
                 if not text:
                     continue
                 decision = self._interaction.decide(text) if self._interaction else None
@@ -273,6 +312,15 @@ class AvatarSession:
                 await self.push({"type": "caption", "from": "user", "text": text})
                 if not decision.command:
                     continue
+                if agent is None:
+                    try:
+                        logger.info("[avatar] building agent after voice activation")
+                        agent = await build_agent(session, permission_prompt=self.permission_request, event_bus=self.event_bus, cancel_event=self.cancel_event)
+                        logger.info("[avatar] agent_ready")
+                    except Exception as exc:
+                        logger.exception("[avatar] agent build failed")
+                        await self.push({"type": "error", "message": f"falha ao preparar agente: {exc}"})
+                        continue
                 try:
                     answer = await agent.chat(decision.command, conversation_id=self.conversation_id)
                 except asyncio.CancelledError:
@@ -428,18 +476,3 @@ async def avatar_health() -> dict[str, str]:
 @router.get("/", include_in_schema=False)
 async def avatar_index() -> FileResponse:
     return FileResponse(UI_DIR / "index.html")
-
-
-@router.get("/ui/{file_path:path}", include_in_schema=False)
-async def avatar_asset(file_path: str) -> FileResponse:
-    root = UI_DIR.resolve()
-    candidate = (root / file_path).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="asset not found")
-    if not candidate.is_file():
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="asset not found")
-    return FileResponse(candidate)
