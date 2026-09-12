@@ -158,14 +158,9 @@ def record_microphone_vad(
 ) -> Path | None:
     """Grava fala com VAD tolerante a pausas naturais e protege a cauda da frase.
 
-    O detector usa histerese: depois que a fala começa, o limiar fica mais baixo
-    do que o limiar de disparo. Isso evita que palavras finais ditas mais baixo
-    sejam classificadas como silêncio e cortadas antes do Whisper.
-
-    A calibração inicial é determinística: coleta um número fixo de frames de
-    ruído em vez de exigir que esses frames estejam abaixo de ``abs_threshold``.
-    Isso evita travar indefinidamente quando o microfone/driver tem RMS de ruído
-    acima desse valor.
+    A calibração inicial é determinística e a captura falha rapidamente se o
+    callback do dispositivo não entregar nenhum frame. Isso evita a aparência
+    de que o ALPHA está travado quando o problema real é o dispositivo/driver.
     """
     try:
         import sounddevice
@@ -180,6 +175,10 @@ def record_microphone_vad(
     device_index = _resolve_device(device)
     blocksize = max(1, int(sample_rate * frame_duration))
     frames_queue: Any = queue.Queue(maxsize=128)
+    callback_started = threading.Event()
+    callback_error: list[str] = []
+    callback_count = 0
+    callback_count_lock = threading.Lock()
 
     pre_roll_frames = max(1, round(pre_roll_duration / frame_duration))
     pre_roll_buffer: list[np.ndarray] = []
@@ -192,12 +191,25 @@ def record_microphone_vad(
             use_webrtc_vad = False
 
     def callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
-        sample = indata.flatten()
-        rms = float(math.sqrt(float(np.mean(np.square(sample.astype(np.float32))))))
+        nonlocal callback_count
+        callback_started.set()
+        with callback_count_lock:
+            callback_count += 1
+        if status:
+            status_text = str(status)
+            if len(callback_error) < 3:
+                callback_error.append(status_text)
+            print(f"[audio] callback_status={status_text}", flush=True)
         try:
+            sample = indata.flatten()
+            rms = float(math.sqrt(float(np.mean(np.square(sample.astype(np.float32))))))
             frames_queue.put_nowait((rms, sample.copy()))
         except queue.Full:
             pass
+        except Exception as exc:
+            if len(callback_error) < 3:
+                callback_error.append(str(exc))
+            print(f"[audio] callback_error={exc}", flush=True)
 
     speech_chunks: list[np.ndarray] = []
     speech_started = False
@@ -206,8 +218,6 @@ def record_microphone_vad(
     trailing_threshold = abs_threshold * 0.72
     pre_roll_at_start: list[np.ndarray] = []
 
-    # 0.30s of deterministic calibration at the default 50ms frame size.
-    # Crucially, calibration no longer depends on RMS being < abs_threshold.
     calibration_frames_needed = max(4, round(0.30 / frame_duration))
     calibration_rms: list[float] = []
 
@@ -218,7 +228,6 @@ def record_microphone_vad(
         dtype="int16",
         blocksize=blocksize,
         callback=callback,
-        latency="low",
     )
     capture_started_at = time.monotonic()
     print(
@@ -226,96 +235,110 @@ def record_microphone_vad(
         f"sample_rate={sample_rate} frame={frame_duration:.2f}s",
         flush=True,
     )
-    with stream:
-        confirming_frames = 0
-        silent_frames = 0
-        silence_frames_needed = max(1, round(silence_pad / frame_duration))
-        speech_frames_min = max(1, round(min_speech_duration / frame_duration))
-        speech_confirmed = max(1, int(speech_confirm_frames))
-        deadline = time.monotonic() + max_wait
-        calibration_complete = False
+    try:
+        with stream:
+            confirming_frames = 0
+            silent_frames = 0
+            silence_frames_needed = max(1, round(silence_pad / frame_duration))
+            speech_frames_min = max(1, round(min_speech_duration / frame_duration))
+            speech_confirmed = max(1, int(speech_confirm_frames))
+            deadline = time.monotonic() + max_wait
+            calibration_complete = False
+            callback_deadline = time.monotonic() + 2.0
 
-        while True:
-            if abort_event is not None and abort_event.is_set():
-                break
-            try:
-                rms, sample = frames_queue.get(timeout=0.08)
-            except queue.Empty:
+            while True:
+                if abort_event is not None and abort_event.is_set():
+                    break
+                if not callback_started.is_set() and time.monotonic() >= callback_deadline:
+                    detail = "; ".join(callback_error) if callback_error else "nenhum frame recebido do dispositivo"
+                    raise MicrophoneRecordingError(
+                        f"microfone não entregou áudio em 2s ({detail})"
+                    )
+                try:
+                    rms, sample = frames_queue.get(timeout=0.08)
+                except queue.Empty:
+                    if time.monotonic() >= deadline:
+                        break
+                    continue
+
+                if len(pre_roll_buffer) < pre_roll_frames:
+                    pre_roll_buffer.append(sample.copy())
+                else:
+                    pre_roll_buffer.pop(0)
+                    pre_roll_buffer.append(sample.copy())
+
+                if not calibration_complete and not use_webrtc_vad:
+                    calibration_rms.append(rms)
+                    if len(calibration_rms) >= calibration_frames_needed:
+                        noise_floor = float(
+                            np.percentile(np.asarray(calibration_rms, dtype=np.float32), 10)
+                        )
+                        threshold = _vad_threshold(
+                            noise_floor, abs_threshold, noise_floor_multiplier
+                        )
+                        trailing_threshold = max(
+                            abs_threshold * 0.60,
+                            noise_floor * 1.55,
+                        )
+                        calibration_complete = True
+                        print(
+                            f"[audio] calibration_done noise_floor={noise_floor:.1f} "
+                            f"threshold={threshold:.1f} trailing_threshold={trailing_threshold:.1f}",
+                            flush=True,
+                        )
+                    continue
+
+                if use_webrtc_vad and webrtc_vad is not None:
+                    is_voice = _vad_webrtc(sample, sample_rate, webrtc_vad)
+                else:
+                    is_voice = rms >= (
+                        trailing_threshold if speech_started else threshold
+                    )
+
+                if not speech_started:
+                    confirming_frames = confirming_frames + 1 if is_voice else 0
+                    if confirming_frames >= speech_confirmed:
+                        speech_started = True
+                        speech_started_at = time.monotonic()
+                        silent_frames = 0
+                        pre_roll_at_start = [chunk.copy() for chunk in pre_roll_buffer]
+                        speech_chunks = [sample.copy()]
+                        print(
+                            f"[audio] speech_start rms={rms:.1f} threshold={threshold:.1f}",
+                            flush=True,
+                        )
+                        if on_speech_start is not None:
+                            on_speech_start()
+                else:
+                    if is_voice:
+                        silent_frames = 0
+                    else:
+                        silent_frames += 1
+                        speech_duration = time.monotonic() - (
+                            speech_started_at or time.monotonic()
+                        )
+                        if (
+                            silent_frames >= silence_frames_needed
+                            and speech_duration >= min_speech_duration
+                        ):
+                            break
+                    speech_chunks.append(sample.copy())
+
                 if time.monotonic() >= deadline:
                     break
-                continue
-
-            if len(pre_roll_buffer) < pre_roll_frames:
-                pre_roll_buffer.append(sample.copy())
-            else:
-                pre_roll_buffer.pop(0)
-                pre_roll_buffer.append(sample.copy())
-
-            if not calibration_complete and not use_webrtc_vad:
-                calibration_rms.append(rms)
-                if len(calibration_rms) >= calibration_frames_needed:
-                    noise_floor = float(
-                        np.percentile(np.asarray(calibration_rms, dtype=np.float32), 10)
-                    )
-                    threshold = _vad_threshold(
-                        noise_floor, abs_threshold, noise_floor_multiplier
-                    )
-                    trailing_threshold = max(
-                        abs_threshold * 0.60,
-                        noise_floor * 1.55,
-                    )
-                    calibration_complete = True
-                    print(
-                        f"[audio] calibration_done noise_floor={noise_floor:.1f} "
-                        f"threshold={threshold:.1f} trailing_threshold={trailing_threshold:.1f}",
-                        flush=True,
-                    )
-                continue
-
-            if use_webrtc_vad and webrtc_vad is not None:
-                is_voice = _vad_webrtc(sample, sample_rate, webrtc_vad)
-            else:
-                is_voice = rms >= (
-                    trailing_threshold if speech_started else threshold
-                )
-
-            if not speech_started:
-                confirming_frames = confirming_frames + 1 if is_voice else 0
-                if confirming_frames >= speech_confirmed:
-                    speech_started = True
-                    speech_started_at = time.monotonic()
-                    silent_frames = 0
-                    pre_roll_at_start = [chunk.copy() for chunk in pre_roll_buffer]
-                    speech_chunks = [sample.copy()]
-                    print(
-                        f"[audio] speech_start rms={rms:.1f} threshold={threshold:.1f}",
-                        flush=True,
-                    )
-                    if on_speech_start is not None:
-                        on_speech_start()
-            else:
-                if is_voice:
-                    silent_frames = 0
-                else:
-                    silent_frames += 1
-                    speech_duration = time.monotonic() - (
-                        speech_started_at or time.monotonic()
-                    )
-                    if (
-                        silent_frames >= silence_frames_needed
-                        and speech_duration >= min_speech_duration
-                    ):
-                        break
-                speech_chunks.append(sample.copy())
-
-            if time.monotonic() >= deadline:
-                break
+    except MicrophoneRecordingError:
+        raise
+    except Exception as exc:
+        raise MicrophoneRecordingError(f"falha ao capturar microfone: {exc}") from exc
 
     if not speech_started or len(speech_chunks) < speech_frames_min:
         logger_duration = time.monotonic() - capture_started_at
+        with callback_count_lock:
+            received = callback_count
         print(
             f"[audio] capture_discarded duration={logger_duration:.2f}s "
-            f"speech_started={speech_started} calibrated={calibration_complete}",
+            f"speech_started={speech_started} calibrated={calibration_complete} "
+            f"callbacks={received}",
             flush=True,
         )
         return None
