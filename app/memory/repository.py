@@ -5,18 +5,39 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Protocol, Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Memory as MemoryModel
+from app.memory.policies import is_expired, retrieval_score
+from app.memory.types import MemoryType
 
 _TOKEN_RE = re.compile(r"[a-zA-Z\u00C0-\u017F0-9]+")
 
 
+class MemoryRepositoryProtocol(Protocol):
+    async def list(self, limit: int = 100, memory_type: str | None = None) -> list[Any]: ...
+    async def get(self, memory_id: str) -> Any | None: ...
+    async def save(self, memory: Any) -> Any: ...
+    async def delete(self, memory_id: str) -> None: ...
+    async def search(
+        self,
+        query: str,
+        embedding: Sequence[float] | None = None,
+        *,
+        limit: int = 5,
+        min_score: float = 0.0,
+        memory_types: Sequence[str] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> list[Any]: ...
+    async def purge_expired(self) -> int: ...
+
+
 def cosine_similarity(a: Sequence[float] | None, b: Sequence[float] | None) -> float:
-    """Cosseno entre dois vetores; 0.0 se algum deles for inválido/vazio."""
     if not a or not b or len(a) != len(b):
         return 0.0
     dot = sum(x * y for x, y in zip(a, b, strict=True))
@@ -26,15 +47,13 @@ def cosine_similarity(a: Sequence[float] | None, b: Sequence[float] | None) -> f
 
 
 def keyword_overlap_score(query: str, content: str) -> float:
-    """Similaridade léxica simples entre consulta e conteúdo (0..1)."""
     if not query or not content:
         return 0.0
     query_tokens = set(_TOKEN_RE.findall(query.lower()))
     content_tokens = set(_TOKEN_RE.findall(content.lower()))
     if not query_tokens or not content_tokens:
         return 0.0
-    intersection = len(query_tokens & content_tokens)
-    return intersection / math.sqrt(len(query_tokens) * len(content_tokens))
+    return len(query_tokens & content_tokens) / math.sqrt(len(query_tokens) * len(content_tokens))
 
 
 def hybrid_score(
@@ -42,14 +61,8 @@ def hybrid_score(
     content: str,
     query_embedding: Sequence[float] | None,
     memory_embedding: Sequence[float] | None,
-    *,
-    embedding_weight: float = 0.55,
-    keyword_weight: float = 0.45,
 ) -> float:
-    """Combina similaridade de embedding e léxica em uma nota única (0..1)."""
-    cosine = cosine_similarity(query_embedding, memory_embedding)
-    lexical = keyword_overlap_score(query, content)
-    return embedding_weight * cosine + keyword_weight * lexical
+    return 0.55 * cosine_similarity(query_embedding, memory_embedding) + 0.45 * keyword_overlap_score(query, content)
 
 
 @dataclass(slots=True)
@@ -59,30 +72,42 @@ class MemoryRecord:
     memory_type: str
     source: str
     importance: float
+    confidence: float
     embedding: list[float] | None
-    metadata: dict
+    metadata: dict[str, Any]
     created_at: object
     updated_at: object
+    expiration: object | None
 
 
 class MemoryRepository:
+    """SQLite/SQLAlchemy adapter behind the MemoryRepository abstraction.
+
+    Agent and MemoryService depend on this contract, not on SQLite. A future
+    MongoDB adapter can implement the same protocol without changing Agent.
+    """
+
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.logger = logging.getLogger("app.memory.repository")
 
-    async def list(self, limit: int = 100) -> list[MemoryModel]:
+    async def list(self, limit: int = 100, memory_type: str | None = None) -> list[MemoryModel]:
         try:
-            result = await self.session.execute(
-                select(MemoryModel).order_by(MemoryModel.created_at.desc()).limit(limit)
-            )
+            stmt = select(MemoryModel).where(MemoryModel.expiration.is_(None) | (MemoryModel.expiration > datetime.now(UTC)))
+            if memory_type:
+                stmt = stmt.where(MemoryModel.memory_type == memory_type)
+            result = await self.session.execute(stmt.order_by(MemoryModel.created_at.desc()).limit(limit))
             return list(result.scalars().all())
         except SQLAlchemyError as exc:
-            self.logger.debug("DB list error, returning empty list: %s", exc)
+            self.logger.debug("DB list error: %s", exc)
             return []
 
     async def get(self, memory_id: str) -> MemoryModel | None:
         try:
-            return await self.session.get(MemoryModel, memory_id)
+            memory = await self.session.get(MemoryModel, memory_id)
+            if memory is None or is_expired(memory.expiration):
+                return None
+            return memory
         except SQLAlchemyError:
             return None
 
@@ -93,15 +118,65 @@ class MemoryRepository:
             await self.session.refresh(memory)
             return memory
         except SQLAlchemyError as exc:
-            self.logger.debug("DB save error, aborting save: %s", exc)
-            return memory
+            await self.session.rollback()
+            self.logger.debug("DB save error: %s", exc)
+            raise
 
     async def delete(self, memory_id: str) -> None:
         try:
             await self.session.execute(delete(MemoryModel).where(MemoryModel.id == memory_id))
             await self.session.commit()
         except SQLAlchemyError as exc:
+            await self.session.rollback()
             self.logger.debug("DB delete error: %s", exc)
+            raise
+
+    async def search(
+        self,
+        query: str,
+        embedding: Sequence[float] | None = None,
+        *,
+        limit: int = 5,
+        min_score: float = 0.0,
+        memory_types: Sequence[str] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> list[MemoryModel]:
+        now = datetime.now(UTC)
+        try:
+            stmt = select(MemoryModel).where(
+                (MemoryModel.expiration.is_(None) | (MemoryModel.expiration > now))
+            )
+            if memory_types:
+                stmt = stmt.where(MemoryModel.memory_type.in_(list(memory_types)))
+            result = await self.session.execute(stmt.order_by(MemoryModel.created_at.desc()).limit(500))
+            candidates = list(result.scalars().all())
+        except SQLAlchemyError as exc:
+            self.logger.debug("DB search error: %s", exc)
+            return []
+
+        context = context or {}
+        scored = []
+        for memory in candidates:
+            similarity = hybrid_score(query, memory.content, embedding, memory.embedding)
+            lexical = keyword_overlap_score(query, memory.content)
+            context_score = 1.0 if context and any(
+                str(value).lower() in memory.content.lower()
+                for value in context.values()
+                if value
+            ) else lexical
+            score = retrieval_score(
+                similarity,
+                memory.importance,
+                memory.created_at,
+                memory.memory_type,
+                context_score=context_score,
+                now=now,
+            )
+            if score >= min_score:
+                scored.append((memory, score))
+
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return [memory for memory, _ in scored[:limit]]
 
     async def search_by_embedding(
         self,
@@ -110,35 +185,16 @@ class MemoryRepository:
         keyword: str | None = None,
         min_score: float = 0.0,
     ) -> list[MemoryModel]:
-        """Busca memórias relevantes combinando vetor e léxico.
+        return await self.search(keyword or "", embedding, limit=limit, min_score=min_score)
 
-        O filtro carrega um conjunto de candidatos recentes e ordena por uma
-        nota híbrida (cosseno do embedding + sobreposição de tokens). Isso evita
-        devolver as N memórias mais recentes quando não têm relação com a
-        consulta — causa de contexto alucinado do modelo.
-
-        ``min_score`` corta candidatos irrelevantes (>= 0): memória que fica
-        abaixo do limiar NÃO vira contexto do agente.
-        """
-        query = (keyword or "").strip()
+    async def purge_expired(self) -> int:
         try:
             result = await self.session.execute(
-                select(MemoryModel).order_by(MemoryModel.created_at.desc()).limit(500)
+                delete(MemoryModel).where(MemoryModel.expiration.is_not(None), MemoryModel.expiration <= datetime.now(UTC))
             )
-            candidates = list(result.scalars().all())
+            await self.session.commit()
+            return int(result.rowcount or 0)
         except SQLAlchemyError as exc:
-            self.logger.debug("DB search error, returning empty: %s", exc)
-            return []
-
-        scored = sorted(
-            (
-                (memory, hybrid_score(query, memory.content, embedding, memory.embedding))
-                for memory in candidates
-            ),
-            key=lambda pair: pair[1],
-            reverse=True,
-        )
-        relevant = [
-            memory for memory, score in scored if score >= min_score
-        ]
-        return relevant[:limit]
+            await self.session.rollback()
+            self.logger.debug("DB expiration cleanup error: %s", exc)
+            return 0
