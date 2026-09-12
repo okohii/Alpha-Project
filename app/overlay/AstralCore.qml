@@ -5,14 +5,24 @@ Item {
     id: root
     property real energy: 0.0
     property string state: "idle"
+    property real motion: 0.0
 
     anchors.fill: parent
+
+    readonly property real statePulse: {
+        if (state === "listening") return 0.10
+        if (state === "thinking" || state === "planning") return 0.16
+        if (state === "executing" || state === "verifying") return 0.22
+        if (state === "speaking") return 0.28
+        if (state === "success") return 0.18
+        if (state === "error") return 0.06
+        return 0.03
+    }
 
     View3D {
         anchors.fill: parent
         camera: camera
         renderMode: View3D.Offscreen
-
         environment: SceneEnvironment {
             backgroundMode: SceneEnvironment.Transparent
             clearColor: "transparent"
@@ -30,32 +40,31 @@ Item {
         DirectionalLight {
             eulerRotation.x: -35
             eulerRotation.y: 25
-            brightness: 1.8
+            brightness: 1.8 + root.statePulse * 3
             color: "#b9ecff"
         }
 
         PointLight {
             position: Qt.vector3d(0, 80, 260)
-            brightness: 2.0 + root.energy * 3.0
-            color: "#62d8ff"
+            brightness: 2.0 + root.energy * 3.0 + root.statePulse * 5
+            color: root.state === "error" ? "#ff6b9a" : root.state === "success" ? "#75ffbd" : "#62d8ff"
         }
 
         Node {
             id: coreNode
-            eulerRotation.y: 20 + sin(rotationClock * 0.7) * 8
-            eulerRotation.x: sin(rotationClock * 0.45) * 6
+            eulerRotation.y: root.motion * 34
+            eulerRotation.x: Math.sin(root.motion * 0.7) * 8
             scale: Qt.vector3d(
-                1.0 + root.energy * 0.10,
-                1.0 + root.energy * 0.10,
-                1.0 + root.energy * 0.10
+                1.0 + root.energy * 0.10 + root.statePulse,
+                1.0 + root.energy * 0.10 + root.statePulse,
+                1.0 + root.energy * 0.10 + root.statePulse
             )
 
             Model {
-                id: core
                 source: "#Sphere"
                 scale: Qt.vector3d(1.55, 1.55, 1.55)
                 materials: PrincipledMaterial {
-                    baseColor: "#66dfff"
+                    baseColor: root.state === "error" ? "#ff5d8f" : root.state === "success" ? "#72ffc0" : "#66dfff"
                     metalness: 0.55
                     roughness: 0.18
                     emissiveFactor: Qt.vector3d(0.18, 0.65, 1.0)
@@ -71,16 +80,15 @@ Item {
                     metalness: 0.35
                     roughness: 0.3
                     transmissionFactor: 0.35
-                    opacity: 0.18 + root.energy * 0.10
+                    opacity: 0.18 + root.energy * 0.10 + root.statePulse * 0.2
                     emissiveFactor: Qt.vector3d(0.05, 0.15, 0.45)
                 }
             }
         }
 
         Node {
-            id: ringA
             eulerRotation.x: 65
-            eulerRotation.y: rotationClock * 34
+            eulerRotation.y: root.motion * 34
             Model {
                 source: "#Torus"
                 scale: Qt.vector3d(1.35, 1.35, 1.35)
@@ -95,10 +103,9 @@ Item {
         }
 
         Node {
-            id: ringB
             eulerRotation.x: -55
             eulerRotation.z: 30
-            eulerRotation.y: -rotationClock * 25
+            eulerRotation.y: -root.motion * 25
             Model {
                 source: "#Torus"
                 scale: Qt.vector3d(1.62, 1.62, 1.62)
@@ -113,9 +120,8 @@ Item {
         }
 
         Node {
-            id: ringC
             eulerRotation.y: 90
-            eulerRotation.z: rotationClock * 18
+            eulerRotation.z: root.motion * 18
             Model {
                 source: "#Torus"
                 scale: Qt.vector3d(1.95, 1.95, 1.95)
@@ -124,7 +130,7 @@ Item {
                     metalness: 0.65
                     roughness: 0.22
                     emissiveFactor: Qt.vector3d(0.05, 0.35, 0.8)
-                    opacity: 0.28
+                    opacity: 0.28 + root.statePulse
                 }
             }
         }
@@ -134,29 +140,17 @@ Item {
             scale: Qt.vector3d(2.5, 2.5, 2.5)
             materials: PrincipledMaterial {
                 baseColor: "#52d8ff"
-                opacity: 0.025 + root.energy * 0.015
+                opacity: 0.025 + root.energy * 0.015 + root.statePulse * 0.04
                 transmissionFactor: 0.8
                 emissiveFactor: Qt.vector3d(0.04, 0.15, 0.35)
             }
         }
     }
 
-    NumberAnimation {
-        id: rotationClock
-        property: "rotationClock"
-        from: 0
-        to: 360
-        duration: 24000
-        loops: Animation.Infinite
-        running: true
-    }
-
-    property real rotationClock: 0
-
     Timer {
         interval: 16
         running: true
         repeat: true
-        onTriggered: root.rotationClock = (root.rotationClock + 0.24) % 360
+        onTriggered: root.motion = (root.motion + 0.004) % 6.28318
     }
 }
