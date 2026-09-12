@@ -12,7 +12,7 @@ from app.core.config import get_settings
 from app.llm.configured_ollama import ConfiguredOllamaProvider
 from app.llm.router import LLMRouter
 from app.memory.embeddings import LocalEmbeddingProvider
-from app.memory.repository import MemoryRepository
+from app.memory.repository import SqliteMemoryRepository
 from app.memory.service import MemoryService
 from app.reminders.service import ReminderRepository, ReminderService
 from app.security import SENSITIVE_PREFIX
@@ -31,7 +31,7 @@ async def build_agent(
     event_bus: Any | None = None,
     cancel_event: asyncio.Event | None = None,
 ) -> SerializedAgentCore:
-    memory_repository = MemoryRepository(session)
+    memory_repository = SqliteMemoryRepository(session)
     memory_service = MemoryService(memory_repository, LocalEmbeddingProvider())
 
     managed_path_repository = ManagedPathRepository(session)
