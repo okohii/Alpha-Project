@@ -9,12 +9,11 @@ from app.desktop.native import run_native, start_backend
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 18081
-DEFAULT_WIDTH = 330
-DEFAULT_HEIGHT = 470
+DEFAULT_WIDTH = 240
+DEFAULT_HEIGHT = 240
 
 
 def open_avatar(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT, transparent: bool = True) -> int:
-    # ``transparent`` permanece na API por compatibilidade; Qt controla a transparência.
     _ = transparent
     return run_native(mode="avatar", host=host, port=port, width=width, height=height)
 
