@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, Any
+from typing import Any, Protocol
 
 from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -14,12 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Memory as MemoryModel
 from app.memory.policies import is_expired, retrieval_score
-from app.memory.types import MemoryType
 
 _TOKEN_RE = re.compile(r"[a-zA-Z\u00C0-\u017F0-9]+")
 
 
-class MemoryRepositoryProtocol(Protocol):
+class MemoryRepository(Protocol):
+    """Backend-neutral memory contract used by MemoryService/Agent."""
+
     async def list(self, limit: int = 100, memory_type: str | None = None) -> list[Any]: ...
     async def get(self, memory_id: str) -> Any | None: ...
     async def save(self, memory: Any) -> Any: ...
@@ -35,6 +36,9 @@ class MemoryRepositoryProtocol(Protocol):
         context: dict[str, Any] | None = None,
     ) -> list[Any]: ...
     async def purge_expired(self) -> int: ...
+
+
+MemoryRepositoryProtocol = MemoryRepository
 
 
 def cosine_similarity(a: Sequence[float] | None, b: Sequence[float] | None) -> float:
@@ -80,11 +84,12 @@ class MemoryRecord:
     expiration: object | None
 
 
-class MemoryRepository:
-    """SQLite/SQLAlchemy adapter behind the MemoryRepository abstraction.
+class SqliteMemoryRepository:
+    """SQLAlchemy/SQLite implementation of the backend-neutral MemoryRepository.
 
-    Agent and MemoryService depend on this contract, not on SQLite. A future
-    MongoDB adapter can implement the same protocol without changing Agent.
+    PostgreSQL remains supported through the same SQLAlchemy adapter. A future
+    MongoDB implementation only needs to satisfy MemoryRepository; Agent and
+    MemoryService do not need to change.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -93,10 +98,15 @@ class MemoryRepository:
 
     async def list(self, limit: int = 100, memory_type: str | None = None) -> list[MemoryModel]:
         try:
-            stmt = select(MemoryModel).where(MemoryModel.expiration.is_(None) | (MemoryModel.expiration > datetime.now(UTC)))
+            now = datetime.now(UTC)
+            stmt = select(MemoryModel).where(
+                MemoryModel.expiration.is_(None) | (MemoryModel.expiration > now)
+            )
             if memory_type:
                 stmt = stmt.where(MemoryModel.memory_type == memory_type)
-            result = await self.session.execute(stmt.order_by(MemoryModel.created_at.desc()).limit(limit))
+            result = await self.session.execute(
+                stmt.order_by(MemoryModel.created_at.desc()).limit(limit)
+            )
             return list(result.scalars().all())
         except SQLAlchemyError as exc:
             self.logger.debug("DB list error: %s", exc)
@@ -144,18 +154,20 @@ class MemoryRepository:
         now = datetime.now(UTC)
         try:
             stmt = select(MemoryModel).where(
-                (MemoryModel.expiration.is_(None) | (MemoryModel.expiration > now))
+                MemoryModel.expiration.is_(None) | (MemoryModel.expiration > now)
             )
             if memory_types:
                 stmt = stmt.where(MemoryModel.memory_type.in_(list(memory_types)))
-            result = await self.session.execute(stmt.order_by(MemoryModel.created_at.desc()).limit(500))
+            result = await self.session.execute(
+                stmt.order_by(MemoryModel.created_at.desc()).limit(500)
+            )
             candidates = list(result.scalars().all())
         except SQLAlchemyError as exc:
             self.logger.debug("DB search error: %s", exc)
             return []
 
         context = context or {}
-        scored = []
+        scored: list[tuple[MemoryModel, float]] = []
         for memory in candidates:
             similarity = hybrid_score(query, memory.content, embedding, memory.embedding)
             lexical = keyword_overlap_score(query, memory.content)
@@ -190,7 +202,10 @@ class MemoryRepository:
     async def purge_expired(self) -> int:
         try:
             result = await self.session.execute(
-                delete(MemoryModel).where(MemoryModel.expiration.is_not(None), MemoryModel.expiration <= datetime.now(UTC))
+                delete(MemoryModel).where(
+                    MemoryModel.expiration.is_not(None),
+                    MemoryModel.expiration <= datetime.now(UTC),
+                )
             )
             await self.session.commit()
             return int(result.rowcount or 0)
@@ -198,3 +213,14 @@ class MemoryRepository:
             await self.session.rollback()
             self.logger.debug("DB expiration cleanup error: %s", exc)
             return 0
+
+
+__all__ = [
+    "MemoryRecord",
+    "MemoryRepository",
+    "MemoryRepositoryProtocol",
+    "SqliteMemoryRepository",
+    "cosine_similarity",
+    "hybrid_score",
+    "keyword_overlap_score",
+]
