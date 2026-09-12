@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     cloud_llm_enabled: bool = False
     cloud_llm_base_url: str = "http://127.0.0.1:20128/v1"
     cloud_llm_api_key: str = ""
-    cloud_llm_model: str = ""
+    # Empty means "use the gateway's combo/profile". For 9Router this is alpha.
+    cloud_llm_model: str = "alpha"
     cloud_llm_timeout_seconds: float = 120.0
 
     llm_mode: Literal["local", "cloud", "auto", "hybrid"] = "local"
