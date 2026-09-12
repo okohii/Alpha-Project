@@ -161,20 +161,34 @@ class FasterWhisperSTT(SpeechToText):
                 logger.info("[stt] transcribe_start mode=%s path=%s duration=%.2fs rate=%d frames=%d", "wake" if wake_only else "full", audio_path, duration, wav.getframerate(), wav.getnframes())
         except Exception:
             duration = 0.0
+
+        # O wake model não deve limitar uma frase real a poucos tokens.
+        # Ele precisa continuar leve, mas deve conseguir atravessar toda a
+        # gravação para encontrar "Alpha/Alfa" e preservar o comando falado.
+        if wake_only:
+            max_new_tokens = max(16, min(64, int(math.ceil(max(duration, 1.0) * 8))))
+            decode_beam_size = 1
+            decode_best_of = 1
+        else:
+            max_new_tokens = None
+            decode_beam_size = max(1, int(self.settings.stt_beam_size))
+            decode_best_of = max(1, int(self.settings.stt_best_of))
+
         kwargs: dict[str, Any] = {
             "language": self.settings.stt_language,
             "initial_prompt": prompt or None,
             "condition_on_previous_text": False,
-            "beam_size": 1 if wake_only else max(1, int(self.settings.stt_beam_size)),
-            "best_of": 1 if wake_only else max(1, int(self.settings.stt_best_of)),
+            "beam_size": decode_beam_size,
+            "best_of": decode_best_of,
             "temperature": 0.0,
             "vad_filter": bool(self.settings.stt_vad_filter),
             "without_timestamps": True,
         }
         if self.settings.stt_vad_filter:
             kwargs["vad_parameters"] = {"min_silence_duration_ms": max(100, int(self.settings.stt_vad_min_silence_ms))}
-        if wake_only:
-            kwargs["max_new_tokens"] = 6
+        if max_new_tokens is not None:
+            kwargs["max_new_tokens"] = max_new_tokens
+
         logger.debug("[stt] decode_kwargs=%s", {k: v for k, v in kwargs.items() if k != "initial_prompt"})
         segments, info = model.transcribe(str(audio_path), **kwargs)
         collected: list[dict[str, Any]] = []
