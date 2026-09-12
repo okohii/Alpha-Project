@@ -15,9 +15,11 @@ def test_avatar_state_enum_covers_requested_states():
         "listening",
         "thinking",
         "planning",
+        "processing",
         "executing",
         "verifying",
         "speaking",
+        "cooldown",
         "success",
         "error",
     }
@@ -26,8 +28,8 @@ def test_avatar_state_enum_covers_requested_states():
 
 def test_event_mapping_core_flow():
     assert state_for_event(EventType.assistant_listening) is AvatarState.LISTENING
-    assert state_for_event(EventType.assistant_transcribing) is AvatarState.LISTENING
-    assert state_for_event(EventType.agent_started) is AvatarState.THINKING
+    assert state_for_event(EventType.assistant_transcribing) is AvatarState.PROCESSING
+    assert state_for_event(EventType.agent_started) is AvatarState.PROCESSING
     assert state_for_event(EventType.assistant_thinking) is AvatarState.THINKING
     assert state_for_event(EventType.agent_progress) is AvatarState.PLANNING
     assert state_for_event(EventType.tool_started) is AvatarState.EXECUTING

@@ -94,11 +94,12 @@ async def test_record_microphone_vad_pre_roll_basic(monkeypatch):
     params = sig.parameters
 
     assert "pre_roll_duration" in params
-    assert params["pre_roll_duration"].default == 0.3
+    assert params["pre_roll_duration"].default == 0.35
     assert 0.2 <= params["pre_roll_duration"].default <= 0.4
 
     assert "silence_pad" in params
-    assert params["silence_pad"].default == 0.8
+    # ``None`` resolve o valor da configuração (stt_capture_silence_pad).
+    assert params["silence_pad"].default is None
 
     assert "use_webrtc_vad" in params
     assert isinstance(params["use_webrtc_vad"].default, bool)

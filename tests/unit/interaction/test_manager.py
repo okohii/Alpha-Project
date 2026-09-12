@@ -50,6 +50,10 @@ def test_end_word_returns_to_dormant():
 def test_timeout_expires_active_session():
     manager = InteractionManager(enabled=True, wake_words="alpha", timeout_seconds=25)
     manager.decide("alpha")
+    # O timeout só é armado quando ALPHA termina de falar (touch_activity);
+    # dormindo-até-resposta ele permanece armado pela atividade do turno.
+    assert manager.expired(manager.last_activity + 25) is False
+    manager.touch_activity()
     assert manager.expired(manager.last_activity + 25) is True
     manager.expire()
     assert manager.state == "dormant"

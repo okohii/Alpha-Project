@@ -126,8 +126,9 @@ def test_llm_router_prefers_local_for_simple_questions(monkeypatch):
     router = LLMRouter(local_provider=local_provider, cloud_provider=cloud_provider)
     router.settings.allow_cloud_llm = True
     router.settings.gemini_api_key = "token"
+    router.settings.llm_mode = "auto"
 
-    monkeypatch.setattr(router, "_internet_available", lambda: False)
+    monkeypatch.setattr(router, "_cloud_available", lambda: False)
 
     assert router.choose("Qual é a capital do Brasil?") is local_provider
 
@@ -142,7 +143,7 @@ async def test_agent_includes_project_context_for_cloud_mode(monkeypatch):
     router.settings.gemini_api_key = "token"
     router.settings.llm_mode = "auto"
 
-    monkeypatch.setattr(router, "_internet_available", lambda: True)
+    monkeypatch.setattr(router, "_cloud_available", lambda: True)
 
     agent = AgentCore(
         llm_router=router,
@@ -150,7 +151,7 @@ async def test_agent_includes_project_context_for_cloud_mode(monkeypatch):
         memory_service=FakeMemoryService(),
     )
 
-    await agent.chat("Explique a arquitetura do projeto e como ele está estruturado.")
+    await agent.chat("Analise a arquitetura do projeto, como ele está estruturado e organize um resumo técnico.")
 
     assert provider.calls
     payload = provider.calls[0][0]

@@ -55,28 +55,16 @@ class TestSTTDeviceDetection:
         assert _determine_stt_device("cpu") == "cpu"
 
     def test_cuda_when_nvidia_available(self, monkeypatch):
-        import subprocess
-
         from app.perception.stt import _determine_stt_device
 
-        monkeypatch.setattr(
-            subprocess,
-            "run",
-            lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "RTX\n"})(),
-        )
+        monkeypatch.setattr("app.perception.stt._cuda_available", lambda: True)
         assert _determine_stt_device("cuda") == "cuda"
         assert _determine_stt_device("auto") == "cuda"
 
     def test_cuda_falls_back_to_cpu_without_gpu(self, monkeypatch):
-        import subprocess
-
         from app.perception.stt import _determine_stt_device
 
-        monkeypatch.setattr(
-            subprocess,
-            "run",
-            lambda *a, **k: type("R", (), {"returncode": 1, "stdout": ""})(),
-        )
+        monkeypatch.setattr("app.perception.stt._cuda_available", lambda: False)
         assert _determine_stt_device("cuda") == "cpu"
         assert _determine_stt_device("auto") == "cpu"
 

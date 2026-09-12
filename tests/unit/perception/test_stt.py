@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -39,12 +38,6 @@ class FakeWhisperModel:
         )
         segments = [FakeSegment()]
         return segments, FakeInfo()
-
-
-class _FakeResult:
-    def __init__(self, returncode: int, stdout: str):
-        self.returncode = returncode
-        self.stdout = stdout
 
 
 # ── initial_prompt semantics ────────────────────────────────────────────────
@@ -109,26 +102,18 @@ async def test_stt_device_falls_back_to_cpu_when_no_gpu(monkeypatch):
 
 @pytest.mark.anyio
 async def test_stt_effective_device_respects_settings(monkeypatch):
-    """_determine_stt_device consults settings + nvidia-smi via subprocess."""
+    """_determine_stt_device consults the real CUDA backend + settings."""
     from app.perception.stt import _determine_stt_device
 
     assert _determine_stt_device("cpu") == "cpu"
 
-    # cuda requested, nvidia-smi succeeds
-    def _fake_smi_success(*args: Any, **kwargs: Any) -> _FakeResult:
-        return _FakeResult(returncode=0, stdout="NVIDIA GeForce RTX 3060\n")
-
-    monkeypatch.setattr(subprocess, "run", _fake_smi_success)
+    # cuda available (backend CUDA reporta dispositivo)
+    monkeypatch.setattr("app.perception.stt._cuda_available", lambda: True)
     assert _determine_stt_device("cuda") == "cuda"
-
-    # auto with GPU
     assert _determine_stt_device("auto") == "cuda"
 
-    # cuda requested, nvidia-smi fails (no GPU)
-    def _fake_smi_fail(*args: Any, **kwargs: Any) -> _FakeResult:
-        return _FakeResult(returncode=1, stdout="")
-
-    monkeypatch.setattr(subprocess, "run", _fake_smi_fail)
+    # sem backend CUDA: queda controlada e observável para cpu
+    monkeypatch.setattr("app.perception.stt._cuda_available", lambda: False)
     assert _determine_stt_device("cuda") == "cpu"
     assert _determine_stt_device("auto") == "cpu"
 

@@ -124,7 +124,7 @@ def test_avatar_integration_state_set_via_events():
 
     messages = asyncio.run(_run())
     states = [m["state"] for m in messages]
-    assert states == ["listening", "thinking", "executing", "speaking", "success"]
+    assert states == ["listening", "processing", "executing", "speaking", "success"]
     assert messages[3]["emotion"] == "calm"
 
 

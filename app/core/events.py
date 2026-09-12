@@ -105,7 +105,13 @@ class EventBus:
         return unsubscribe_all
 
     def emit(self, event_type: EventType, payload: dict[str, Any] | None = None, duration_ms: int | None = None) -> None:
-        safe_payload = _redact(dict(payload or {}))
+        # ``token_stream`` carrega TEXTOS PARCIAIS do modelo (não segredos):
+        # "token" aqui significa token de texto gerado, então a chave não é
+        # redigida senão o TTS/overlay receberiam "[REDACTED]".
+        if event_type is EventType.token_stream:
+            safe_payload = dict(payload or {})
+        else:
+            safe_payload = _redact(dict(payload or {}))
         event = SystemEvent(type=event_type, payload=safe_payload, duration_ms=duration_ms)
         self._audit.append(event)
         if len(self._audit) > _MAX_AUDIT_EVENTS:

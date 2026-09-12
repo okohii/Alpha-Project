@@ -7,6 +7,7 @@ from typing import Any
 from app.agent.serialized import SerializedAgentCore
 from app.core.events import EventType
 from app.llm.base import ExecutionEvidence, LLMMessage, LLMProvider, LLMResponse
+from app.llm.router import ollama_available
 
 
 class Complexity(StrEnum):
@@ -34,7 +35,9 @@ class ComplexityGate:
         "compare", "analisar", "investigar", "organizar", "automatizar",
     )
     _MEDIUM_TERMS = (
-        "abrir", "fechar", "pesquisar", "procurar", "criar", "salvar",
+        "abrir", "abra", "abre", "abri", "fechar", "feche", "fecha",
+        "pesquisar", "procurar", "criar", "salvar",
+        "clique", "clicar", "digite", "digitar", "enviar", "mande",
         "lembrar", "agendar", "arquivo", "pasta", "documento", "macro",
     )
 
@@ -124,7 +127,42 @@ class ReliableAgentCore(SerializedAgentCore):
         guidance = LLMMessage(role="system", content=("GATE DE EXECUÇÃO: classifique o estado antes de concluir. " f"complexidade={self._complexity.level.value}. Use tool calling nativo. " "Considere ações apenas EXECUTADAS até haver evidência de pós-condição. Depois de uma falha ou verificação incerta, a próxima tentativa deve mudar a estratégia: ferramenta alternativa, alvo/argumentos diferente ou nova observação. Nunca repita cegamente a mesma chamada."))
         enriched = list(messages)
         enriched.insert(1 if enriched and enriched[0].role == "system" else 0, guidance)
-        return await super()._provider_turn(provider, enriched, tools, stream_tokens)
+        response = await super()._provider_turn(provider, enriched, tools, stream_tokens)
+        if response.tool_calls or not tools or self._complexity.level is Complexity.SIMPLE:
+            return response
+
+        # Diagóstico estrutural: tarefa acionável com tools expostas, mas o
+        # modelo retornou texto sem tool call nativa. Não deixamos isso ser
+        # silencioso — registramos e, quando a rota primária é cloud, tentamos
+        # UMA vez a rota local (modelo causal com tool calling nativo).
+        exposed = sorted(
+            tool["function"]["name"] if isinstance(tool.get("function"), dict) else tool.get("name", "")
+            for tool in tools
+        )
+        self._emit(
+            EventType.tool_selected,
+            {
+                "task": self._active_task,
+                "status": "no_tool_call",
+                "reason": "modelo retornou texto sem tool call nativa para tarefa acionável",
+                "exposed_tools": exposed,
+                "llm_tool_calls": [],
+            },
+        )
+        route = getattr(provider, "route", None) or getattr(provider, "last_route", None)
+        if route == "cloud":
+            local = getattr(provider, "local", None)
+            if local is not None and local is not provider:
+                local_url = getattr(local, "base_url", None)
+                if local_url is None or await ollama_available(str(local_url)):
+                    self._emit(
+                        EventType.agent_progress,
+                        {"kind": "retry_local", "reason": "no_tool_call_on_cloud_route"},
+                    )
+                    retried = await local.complete(enriched, tools=tools, temperature=None)
+                    if retried.tool_calls or (retried.content or "").strip():
+                        return retried
+        return response
 
     def _checkpoint_for(self, tool_name: str) -> Any | None:
         plan = getattr(self, "_plan", None)

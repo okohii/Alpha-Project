@@ -39,7 +39,7 @@ def test_full_flow_transitions_to_renderer():
     assert controller.state is AvatarState.SUCCESS
     assert [command.state for command in renderer.commands] == [
         AvatarState.LISTENING,
-        AvatarState.THINKING,
+        AvatarState.PROCESSING,
         AvatarState.PLANNING,
         AvatarState.EXECUTING,
         AvatarState.VERIFYING,
@@ -133,5 +133,5 @@ def test_unsubscribe_stops_reacting():
     bus.emit(EventType.agent_started)
     controller.unsubscribe()
     bus.emit(EventType.agent_failed)
-    assert controller.state is AvatarState.THINKING
+    assert controller.state is AvatarState.PROCESSING
     assert len(renderer.commands) == 1

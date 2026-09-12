@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from app.perception.wakeword import find_wake_word, normalize, strip_wake_word
+from app.perception.wakeword import find_wake_word, normalize, strip_wake_prefix
 
 
 @dataclass(frozen=True)
@@ -67,14 +67,18 @@ class InteractionManager:
             # User activity never starts/restarts the timeout. It is armed only
             # by touch_activity(), called after ALPHA finishes speaking.
             self._timeout_armed = False
-            return InteractionDecision(True, command=raw, reason="active_session")
-        found, command = strip_wake_word(raw, self._wake_words)
+            # Mesmo em sessão ativa, um wake word repetido no início da frase
+            # é removido antes de seguir para o Agent (não vira instrução).
+            _, command = strip_wake_prefix(raw, self._wake_words)
+            command = command.strip(" .,!?;:\n\t")
+            return InteractionDecision(True, command=command, reason="active_session")
+        found, command = strip_wake_prefix(raw, self._wake_words)
         if not found:
             return InteractionDecision(False, reason="wake_word_missing")
         self.active = True
         self.last_activity = 0.0
         self._timeout_armed = False
-        command = (command or "").strip(" .,!?;:\n\t")
+        command = command.strip(" .,!?;:\n\t")
         if not command:
             return InteractionDecision(False, activated=True, command="", wake_word=find_wake_word(raw, self._wake_words), reason="wake_word_only")
         return InteractionDecision(True, activated=True, command=command, wake_word=find_wake_word(raw, self._wake_words), reason="wake_word")

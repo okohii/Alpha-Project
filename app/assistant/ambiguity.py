@@ -14,7 +14,11 @@ _REQUIRED_ENTITIES: dict[str, tuple[str, ...]] = {
     "files_read": ("path",),
     "file_read": ("path",),
     "browser_web": ("browser",),
-    "app_open": ("app",),
+    # "app_open" NÃO exige entidade "app": o nome do aplicativo pode ser
+    # livre ("bloco de notas", "notepad", "brave") e a resolução é feita pela
+    # ferramenta open_app + catálogo desktop, que os conhece melhor que um
+    # dicionário fixo. Exigir o slot aqui transformaria qualquer app não
+    # catalogado em um beco sem saída de esclarecimento.
     "macro_execute": ("macro",),
     "shell_run": ("command",),
     "reminder_create": ("when",),
@@ -96,7 +100,7 @@ class AmbiguityDetector:
 
         if intent.name == "generic":
             return AmbiguityIssue(
-                reason="não entendi bem o que fazer; pode me explicar melhor?"
+                reason="não entendi bem o que você pediu"
             )
 
         return None

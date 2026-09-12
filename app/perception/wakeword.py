@@ -62,3 +62,39 @@ def strip_wake_word(text: str, raw_words: str | list[str] | None) -> tuple[bool,
     remainder = re.sub(r"[\s,]+$", "", remainder)
     remainder = re.sub(r"\s{2,}", " ", remainder)
     return True, remainder.strip()
+
+
+def strip_wake_prefix(text: str, raw_words: str | list[str] | None) -> tuple[bool, str]:
+    """Remove a wake word SOMENTE no início, preservando o texto cru.
+
+    Diferente de ``strip_wake_word`` (que remove acentos via NFKD e pode
+    remover a palavra no meio da frase), ``strip_wake_prefix`` mantém
+    maiúsculas/acentos e a maior parte do conteúdo original reconhecido pelo
+    STT — nada além do prefixo do wake word é alterado.
+    """
+    raw = text or ""
+    normalized_text = normalize(raw)
+    if not normalized_text:
+        return False, raw.strip()
+    tokens = sorted(_tokenize_words(raw_words), key=len, reverse=True)
+
+    for word in tokens:
+        match = re.match(rf"^\W*{_escape_regex(word)}(?=\W|$)", raw, flags=re.IGNORECASE)
+        if match:
+            remainder = raw[match.end():]
+            remainder = re.sub(r"^[\s,.!?;:)\"']+", "", remainder)
+            remainder = re.sub(r"\s{2,}", " ", remainder)
+            return True, remainder.strip()
+
+    # Cobre wake word com acento no texto cru (ex.: "Álpha,"): o token
+    # normalizado (NFKD) encontra a posição; o conteúdo retornado segue o
+    # formato normalizado do wake detector.
+    for word in tokens:
+        match = re.match(rf"^\W*{_escape_regex(word)}(?=\W|$)", normalized_text)
+        if match:
+            remainder = normalized_text[match.end():]
+            remainder = re.sub(r"^[\s,.!?;:)\"']+", "", remainder)
+            remainder = re.sub(r"\s{2,}", " ", remainder)
+            return True, remainder.strip()
+
+    return False, raw.strip()

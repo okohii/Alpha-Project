@@ -97,7 +97,9 @@ _FAILURE_CLAIM_RE = re.compile(
     r"n[aã]o\s+encontrei|n[aã]o\s+encontrad|n[aã]o\s+foi\s+salvo|n[aã]o\s+salvo|"
     r"n[aã]o\s+foi\s+executad|n[aã]o\s+foi\s+realizad|"
     r"tentei|tentou|tentamos|recusad|negad|problema|problemas|pendente|"
-    r"deu\s+errado|n[aã]o\s+est[aá]\s+aberto|n[aã]o\s+abriu"
+    r"deu\s+errado|n[aã]o\s+est[aá]\s+aberto|n[aã]o\s+abriu|"
+    r"n[aã]o\s+salvei|n[aã]o\s+gravei|n[aã]o\s+guardei|n[aã]o\s+registrei|n[aã]o\s+anotei|"
+    r"n[aã]o\s+persisti|n[aã]o\s+memorizei"
     r")\b",
     re.IGNORECASE,
 )
@@ -187,6 +189,10 @@ class ExecutionContext:
         self.selected_skills = selected_skills or []
         self.exposed_tools = exposed_tools or set()
         self.permissions = permissions or set()
+        # Diagnóstico de seleção de ferramenta do turno (selected/unavailable/
+        # rejected/ambiguous/no_tool_call) + motivo.
+        self.tool_selection_status: str | None = None
+        self.tool_selection_reason: str | None = None
         # Estado que deve ser limpo ao final ou em cancelamento
         self.tool_calls: list[ToolCall] = []
         self.tool_results: list[ExecutionEvidence] = []
@@ -290,9 +296,10 @@ class AgentCore:
         event = SystemEvent(
             type=event_type, payload=dict(payload or {}), duration_ms=duration_ms
         )
-        self.events.append(event)
-        if self.event_bus is not None:
-            self.event_bus.emit(event_type, event.payload, duration_ms)
+        self.__dict__.setdefault("events", []).append(event)
+        event_bus = getattr(self, "event_bus", None)
+        if event_bus is not None:
+            event_bus.emit(event_type, event.payload, duration_ms)
         return event
 
     def _is_cancelled(self) -> bool:
@@ -461,17 +468,28 @@ class AgentCore:
             else []
         )
         emotional_only = explicit_emotion is not None and not _turn_skills
-        provider = self.llm_router.choose(message)
-        # Build provider metadata for the response
+        context.selected_skills = [skill.name for skill in _turn_skills]
+        decision = self.llm_router.resolve_route(message)
+        provider = decision.provider
+        self._route_decision = decision
+        logger.info(
+            "[LLM] mode=%s configured=%s effective=%s route=%s model=%s fallback_reason=%s cloud_available=%s",
+            self.settings.llm_mode,
+            decision.configured_mode,
+            decision.effective_mode,
+            decision.selected_route,
+            decision.primary_model,
+            decision.fallback_reason,
+            decision.cloud_available,
+        )
+        # Build provider metadata for the response (metadados da rota PRIMÁRIA).
         provider_class = provider.__class__.__name__
         provider_model = getattr(provider, "model", None)
         provider_base = getattr(provider, "base_url", None)
         if isinstance(provider, FaultTolerantProvider):
-            # prefer cloud metadata when available
-            cloud = getattr(provider, "cloud", None)
-            local = getattr(provider, "local", None)
-            provider_model = getattr(cloud, "model", None) or getattr(local, "model", None)
-            provider_base = getattr(cloud, "base_url", None) or getattr(local, "base_url", None)
+            primary = getattr(provider, "primary", None)
+            provider_model = getattr(primary, "model", None)
+            provider_base = getattr(primary, "base_url", None)
 
         # Camada COMPREENDER (opcional): cumprimentos/perguntas simples respondem
         # sem LLM/sem tools; intents ambíguos pedem esclarecimento. Tudo que
@@ -604,17 +622,33 @@ class AgentCore:
         emotion = context.emotion_state.to_dict() if context.emotion_state is not None else None
         tools_used = list(self._tools_used)
         evidence_out = list(self._evidence)
+        execution_id = context.execution_id
+        route_decision = getattr(self, "_route_decision", None)
+        route_info = {
+            "configured_mode": route_decision.configured_mode if route_decision else self.settings.llm_mode,
+            "effective_mode": route_decision.effective_mode if route_decision else self.settings.llm_mode,
+            "selected_route": route_decision.selected_route if route_decision else None,
+            "fallback_reason": route_decision.fallback_reason if route_decision else None,
+            "model": route_decision.primary_model if route_decision else provider_model,
+        }
         # Reset context: estado operacional não persiste para o próximo turno
         context.reset()
         return {
             "response": response.content,
             "conversation_id": conversation_id,
+            "execution_id": execution_id,
             "memory_created": memory_created,
             "emotion": emotion,
             "tools_used": tools_used,
             "evidence": evidence_out,
             "security_audit": list(self._security_log),
             "facilitator": True,
+            "task": context.user_message,
+            "selected_skills": list(context.selected_skills),
+            "exposed_tools": sorted(context.exposed_tools),
+            "tool_selection_status": context.tool_selection_status,
+            "tool_selection_reason": context.tool_selection_reason,
+            "route": route_info,
         }
 
     async def _run_agent_loop(

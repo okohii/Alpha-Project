@@ -28,8 +28,34 @@ _EMOJI_RE = re.compile(
     "]+",
     re.UNICODE,
 )
-_VARIATION_SELECTOR_RE = re.compile(r"[\\uFE0E\\uFE0F\\u200D]")
-_SYMBOL_DECORATION_RE = re.compile(r"[\\u20E3]")
+_VARIATION_SELECTOR_RE = re.compile("[\uFE0E\uFE0F\u200D]")
+_SYMBOL_DECORATION_RE = re.compile("[\u20E3]")
+
+# Substituições tipográficas pontuais e seguras vindas de modelos LLM.
+# "qe" é um typo comum de "que" em respostas de modelos; "nva" de "na",
+# "pra" de "para". Aplicados apenas à saída de voz (nunca ao texto do comando).
+_COMMON_TYPO_RE = re.compile(r"\bqe\b|\bnva\b|\bpra\b", re.IGNORECASE)
+_TYPO_MAP = {"qe": "que", "nva": "na", "pra": "para"}
+
+# Marcadores de tom/emoção (ex.: "[happy]", "[calm]", "[triste]", "[sad/0.8]")
+# NUNCA devem chegar ao TTS: são instruções internas, não fala. Removidos na
+# origem da normalização textual, antes da síntese. Só tokens de emoção
+# conhecidos são removidos — colchetes arbitrários são preservados.
+_EMOTION_WORDS = (
+    "happy|sad|calm|angry|excited|curious|surprised|neutral|content|"
+    "triste|alegre|calmo|bravo|animado|curioso|neutro|sereno"
+)
+_EMOTION_TAG_RE = re.compile(
+    rf"\s*\[({_EMOTION_WORDS})(?:[/_.: \t-]*\s*\d+(?:\.\d+)?)?\]\s*",
+    re.IGNORECASE,
+)
+
+
+def _fix_common_typos(text: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        return _TYPO_MAP.get(match.group(0).lower(), match.group(0))
+
+    return _COMMON_TYPO_RE.sub(_replace, text)
 
 
 def clean_markdown_artifacts(text: str) -> str:
@@ -55,6 +81,8 @@ def clean_for_voice(text: str) -> str:
     cleaned = _EMOJI_RE.sub("", cleaned)
     cleaned = _VARIATION_SELECTOR_RE.sub("", cleaned)
     cleaned = _SYMBOL_DECORATION_RE.sub("", cleaned)
+    cleaned = _EMOTION_TAG_RE.sub(" ", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = _fix_common_typos(cleaned)
     return cleaned.strip()

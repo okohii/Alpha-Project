@@ -37,7 +37,12 @@ class SpeechToText(ABC):
 
 
 def _cuda_available() -> bool:
-    """Check the actual CTranslate2 CUDA backend used by faster-whisper."""
+    """Check the actual CTranslate2 CUDA backend used by faster-whisper.
+
+    Se o backend CUDA do CTranslate2 não estiver disponível, consulta o
+    ``nvidia-smi`` como sinal secundário (cobre ambientes onde o binário
+    CUDA do CTranslate2 não está instalado mas a GPU existe).
+    """
     try:
         import ctranslate2
         count = int(ctranslate2.get_cuda_device_count())
@@ -47,6 +52,21 @@ def _cuda_available() -> bool:
         return bool(supported)
     except Exception as exc:
         logger.warning("[stt] cuda_backend_unavailable reason=%s", exc)
+    try:
+        import shutil
+        import subprocess
+
+        if shutil.which("nvidia-smi") is None:
+            return False
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception as exc:
+        logger.debug("[stt] nvidia-smi check unavailable reason=%s", exc)
         return False
 
 
@@ -57,10 +77,11 @@ def _determine_stt_device(settings_device: str) -> str:
     available = _cuda_available()
     if requested == "cuda":
         if not available:
-            raise SpeechToTextError(
-                "STT configurado para CUDA, mas o backend CUDA do CTranslate2 não está disponível. "
-                "Instale uma versão CUDA de ctranslate2/faster-whisper compatível com sua GPU."
+            # Fallback controlado e observável: nunca derruba a interação.
+            logger.warning(
+                "[stt] CUDA unavailable fallback=cpu reason=cuda_backend_unavailable_but_configured"
             )
+            return "cpu"
         return "cuda"
     if requested == "auto":
         return "cuda" if available else "cpu"
@@ -120,7 +141,17 @@ class FasterWhisperSTT(SpeechToText):
         device = _determine_stt_device(self.settings.stt_device)
         compute_type = _compute_type_for_device(self.settings.stt_compute_type, device)
         logger.info("[stt] loading model=%s device=%s compute_type=%s language=%s", self.settings.stt_model_size, device, compute_type, self.settings.stt_language)
-        self._model = WhisperModel(self.settings.stt_model_size, device=device, compute_type=compute_type)
+        try:
+            self._model = WhisperModel(self.settings.stt_model_size, device=device, compute_type=compute_type)
+        except Exception as exc:
+            if device == "cuda":
+                logger.warning("[stt] cuda_load_failed fallback=cpu reason=%s", exc)
+                device = "cpu"
+                compute_type = _compute_type_for_device("auto", "cpu")
+                logger.info("[stt] fallback loading model=%s device=cpu compute_type=%s", self.settings.stt_model_size, compute_type)
+                self._model = WhisperModel(self.settings.stt_model_size, device="cpu", compute_type=compute_type)
+            else:
+                raise
         logger.info("[stt] model_ready device=%s compute_type=%s", device, compute_type)
         return self._model
 
@@ -135,7 +166,17 @@ class FasterWhisperSTT(SpeechToText):
         compute_type = _compute_type_for_device(self.settings.stt_compute_type, device)
         size = self.settings.stt_wake_model_size or "tiny"
         logger.info("[stt] loading wake_model=%s device=%s compute_type=%s", size, device, compute_type)
-        self._wake_model = WhisperModel(size, device=device, compute_type=compute_type)
+        try:
+            self._wake_model = WhisperModel(size, device=device, compute_type=compute_type)
+        except Exception as exc:
+            if device == "cuda":
+                logger.warning("[stt] cuda_load_failed fallback=cpu reason=%s", exc)
+                device = "cpu"
+                compute_type = _compute_type_for_device("auto", "cpu")
+                logger.info("[stt] fallback loading wake_model=%s device=cpu compute_type=%s", size, compute_type)
+                self._wake_model = WhisperModel(size, device="cpu", compute_type=compute_type)
+            else:
+                raise
         logger.info("[stt] wake_model_ready device=%s compute_type=%s", device, compute_type)
         return self._wake_model
 
@@ -198,10 +239,9 @@ class FasterWhisperSTT(SpeechToText):
             text_parts.append(segment.text)
         text = "".join(text_parts).strip()
         usable = _is_usable_text(text)
-        text_len = len(_ALNUM_RE.sub("", text))
         language_probability = float(getattr(info, "language_probability", 1.0) or 1.0)
         confidence = _decoded_confidence(collected, language_probability)
-        threshold = 0.25 if wake_only else 0.35
-        is_suspicious = (not usable) or (confidence < threshold) or (text_len > 0 and confidence < 0.55)
+        threshold = 0.25 if wake_only else max(0.30, float(self.settings.stt_min_confidence))
+        is_suspicious = (not usable) or (confidence < threshold)
         logger.info("[stt] transcribe_end mode=%s duration=%.2fs text=%r confidence=%.3f language_probability=%.3f usable=%s suspicious=%s segments=%d", "wake" if wake_only else "full", duration, text, confidence, language_probability, usable, is_suspicious, len(collected))
         return TranscriptionResult(text=text, language=info.language or self.settings.stt_language, segments=collected, confidence=confidence, is_suspicious=is_suspicious, is_usable=usable)

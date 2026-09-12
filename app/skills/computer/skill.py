@@ -12,6 +12,10 @@ SKILL = Skill(
         "pesquisar no windows", "pesquisa do windows", "menu iniciar", "menu do windows",
         "windows search", "win+s", "procurar aplicativo", "buscar aplicativo",
         "whatsapp", "teams", "slack", "discord", "telegram", "zoom", "skype",
+        "bloco de notas", "notepad", "notepad++", "notepadpp", "calculadora",
+        "paint", "paint do windows", "explorador de arquivos", "windows explorer",
+        "gerenciador de arquivos", "prompt de comando", "windows terminal",
+        "vscode", "visual studio code", "steam", "obs studio",
     ],
     tools=[
         "open_app", "close_app", "list_apps", "list_monitors", "move_app",

@@ -144,7 +144,7 @@ def record_microphone_vad(
     device: str | int | None = None,
     sample_rate: int = SAMPLE_RATE,
     pre_roll_duration: float = 0.35,
-    silence_pad: float = 1.25,
+    silence_pad: float | None = None,
     min_speech_duration: float = 0.35,
     max_wait: float = 60.0,
     abs_threshold: float = 250.0,
@@ -161,7 +161,15 @@ def record_microphone_vad(
     A calibração inicial é determinística e a captura falha rapidamente se o
     callback do dispositivo não entregar nenhum frame. Isso evita a aparência
     de que o ALPHA está travado quando o problema real é o dispositivo/driver.
+
+    ``silence_pad=None`` resolve o valor da configuração
+    (``stt_capture_silence_pad``); o avatar passa valor explícito via
+    ``_capture_kwargs``.
     """
+    if silence_pad is None:
+        from app.core.config import get_settings
+
+        silence_pad = get_settings().stt_capture_silence_pad
     try:
         import sounddevice
     except Exception as exc:  # pragma: no cover

@@ -9,9 +9,11 @@ DEFAULT_ANIMATIONS: dict[AvatarState, str] = {
     AvatarState.LISTENING: "listening",
     AvatarState.THINKING: "thinking",
     AvatarState.PLANNING: "planning",
+    AvatarState.PROCESSING: "processing",
     AvatarState.EXECUTING: "executing",
     AvatarState.VERIFYING: "verifying",
     AvatarState.SPEAKING: "speaking",
+    AvatarState.COOLDOWN: "cooldown",
     AvatarState.SUCCESS: "success",
     AvatarState.ERROR: "error",
 }
@@ -22,9 +24,11 @@ DEFAULT_EXPRESSIONS: dict[AvatarState, str] = {
     AvatarState.LISTENING: "attentive",
     AvatarState.THINKING: "focused",
     AvatarState.PLANNING: "focused",
+    AvatarState.PROCESSING: "focused",
     AvatarState.EXECUTING: "determined",
     AvatarState.VERIFYING: "checking",
     AvatarState.SPEAKING: "neutral",
+    AvatarState.COOLDOWN: "neutral",
     AvatarState.SUCCESS: "happy",
     AvatarState.ERROR: "concerned",
 }

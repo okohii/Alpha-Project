@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import AsyncIterator
 from typing import Any
 
 from app.agent.agent import AgentCore
 from app.core.events import EventType
-from app.evidence import Evidence, EvidenceKind, VerificationPolicy, VerificationResult, VerificationService
+from app.evidence import (
+    Evidence,
+    EvidenceKind,
+    VerificationPolicy,
+    VerificationResult,
+    VerificationService,
+)
 from app.llm.base import ExecutionEvidence, LLMMessage, LLMProvider, LLMResponse, ToolCall
+
+logger = logging.getLogger("app.agent.serialized")
 
 _TOOL_INTENT_RE = re.compile(
     r"(?:vou|vamos|irei|iremos|usarei|utilizarei)\s+[^.\n]{0,180}",
@@ -58,6 +67,50 @@ class SerializedAgentCore(AgentCore):
     """AgentCore com isolamento operacional e integridade de tool calls."""
 
     _conversation_by_bus: dict[int, str] = {}
+
+    @staticmethod
+    def _provider_model(provider: Any) -> str:
+        for attr in ("primary", "cloud", "local"):
+            candidate = getattr(provider, attr, None)
+            model = getattr(candidate, "model", None)
+            if model:
+                return str(model)
+        model = getattr(provider, "model", None)
+        if model:
+            return str(model)
+        return provider.__class__.__name__
+
+    @staticmethod
+    def _provider_route(provider: Any) -> str:
+        route = getattr(provider, "last_route", None) or getattr(provider, "route", None)
+        if route:
+            return str(route)
+        return provider.__class__.__name__
+
+    @staticmethod
+    def _compute_tool_selection_status(
+        *,
+        executed_count: int,
+        denied_count: int,
+        exposed_tools: set[str],
+        selected_skills: list[str],
+        fallback_used: bool,
+    ) -> tuple[str, str]:
+        """Diagnóstico estrutural da seleção de ferramenta do turno.
+
+        O LLM não é a fonte da verdade: o status deriva do que o runtime
+        observou (exposição, chamadas, negação). Valores: ``selected``,
+        ``rejected``, ``unavailable``, ``ambiguous`` ou ``no_tool_call``.
+        """
+        if executed_count:
+            return "selected", f"{executed_count} tool call(s) executado(s)"
+        if denied_count:
+            return "rejected", f"{denied_count} chamada(s) negada(s) pelo gate de permissão"
+        if not exposed_tools:
+            return "unavailable", "nenhuma ferramenta exposta neste turno"
+        if fallback_used and not selected_skills:
+            return "ambiguous", "nenhuma skill selecionada; usado conjunto fallback"
+        return "no_tool_call", "modelo retornou texto sem tool call nativa"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -270,9 +323,26 @@ class SerializedAgentCore(AgentCore):
         evidence: list[ExecutionEvidence] = []
         new_messages: list[LLMMessage] = []
         executed_signatures: set[str] = set()
+        denied_count = 0
+        selected_skills = list(getattr(context, "selected_skills", []) or [])
+        execute_declared_skills = bool(selected_skills)
 
+        initial_schemas = self._schemas_for(allowed_names, permissions)
+        logger.info(
+            "[LLM] route=%s mode=%s model=%s tools=%d tool_names=%s",
+            self._provider_route(provider),
+            self.settings.llm_mode,
+            self._provider_model(provider),
+            len(initial_schemas),
+            sorted(
+                tool["function"]["name"]
+                if isinstance(tool.get("function"), dict)
+                else tool.get("name", "?")
+                for tool in initial_schemas
+            ),
+        )
         last_response = await self._provider_turn(
-            provider, messages, self._schemas_for(allowed_names, permissions), stream_tokens
+            provider, messages, initial_schemas, stream_tokens
         )
         iterations = 0
         while last_response.tool_calls and iterations < self.settings.agent_max_tool_iterations:
@@ -300,6 +370,8 @@ class SerializedAgentCore(AgentCore):
                 if execution is not None:
                     evidence.append(execution)
                     iteration_executions.append(execution)
+                else:
+                    denied_count += 1
             self._correlate_visual_verification(evidence)
             messages.extend(tool_messages)
             new_messages.extend(tool_messages)
@@ -351,6 +423,19 @@ class SerializedAgentCore(AgentCore):
                 "ou não retornaram um resultado de sucesso. Verifique os erros relatados "
                 "e tente novamente."
             )
+        if last_response.tool_calls and iterations >= self.settings.agent_max_tool_iterations:
+            finish_reason = "tool_call_capped"
+        elif last_response.tool_calls:
+            finish_reason = "tool_call"
+        else:
+            finish_reason = "stop"
+        logger.info(
+            "[LLM] tool_calls=%d finish_reason=%s iterations=%d route=%s",
+            len(executed_signatures),
+            finish_reason,
+            iterations,
+            self._provider_route(provider),
+        )
         final = LLMMessage(role="assistant", content=content)
         messages.append(final)
         new_messages.append(final)
@@ -359,6 +444,32 @@ class SerializedAgentCore(AgentCore):
             context.evidence = list(evidence)
             context.exposed_tools = set(allowed_names)
             context.response_candidate = content
+        fallback_used = bool(allowed_names) and not execute_declared_skills
+        selection_status, selection_reason = self._compute_tool_selection_status(
+            executed_count=len(executed_signatures),
+            denied_count=denied_count,
+            exposed_tools=set(allowed_names),
+            selected_skills=selected_skills,
+            fallback_used=fallback_used,
+        )
+        if context is not None:
+            context.tool_selection_status = selection_status
+            context.tool_selection_reason = selection_reason
+        self._emit(
+            EventType.tool_selected,
+            {
+                "task": task or "",
+                "status": selection_status,
+                "reason": selection_reason,
+                "selected_skills": [str(skill) for skill in selected_skills],
+                "exposed_tools": sorted(allowed_names),
+                "llm_tool_calls": [
+                    f"{tool_call.name}({list((tool_call.arguments or {}).keys())})"
+                    for tool_call in last_response.tool_calls or []
+                ],
+                "finish_reason": finish_reason,
+            },
+        )
         self._emit(
             EventType.assistant_message,
             payload={"preview": content[:120], "content": content},

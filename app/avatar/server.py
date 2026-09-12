@@ -18,7 +18,7 @@ from app.core.config import get_settings
 from app.core.events import EventBus, EventType, SystemEvent
 from app.db.session import AsyncSessionLocal
 from app.interaction import InteractionManager
-from app.perception.wakeword import find_wake_word, normalize, strip_wake_word
+from app.perception.wakeword import find_wake_word, normalize, strip_wake_prefix
 from app.runtime import build_agent
 from app.security import SENSITIVE_PREFIX
 from app.speech import audio_io
@@ -31,7 +31,7 @@ logger = logging.getLogger("app.avatar.server")
 UI_DIR = Path(__file__).parent / "ui"
 _CONFIRM_TIMEOUT = 180.0
 _CONFIRM_YES = {"sim", "sima", "pode", "permitir", "permite", "confirmo", "confirmar", "ok", "okay", "certo", "pode fazer", "pode clicar"}
-_CONFIRM_NO = {"nao", "não", "nega", "negar", "cancelar", "cancela", "não pode", "nao pode", "não", "pare", "parar"}
+_CONFIRM_NO = {"nao", "não", "nega", "negar", "cancelar", "cancela", "não pode", "nao pode", "pare", "parar"}
 _EXECUTION_EVENTS = {EventType.tool_started, EventType.tool_finished, EventType.tool_failed, EventType.skill_started, EventType.skill_finished, EventType.verification_started, EventType.verification_completed, EventType.task_step_completed, EventType.task_completed, EventType.task_failed, EventType.honesty_gate, EventType.textual_tool_call_blocked}
 _EXIT_WORDS = {"sair", "encerrar", "parar", "fechar"}
 
@@ -54,6 +54,45 @@ def _parse_confirmation_candidate(candidate: str) -> dict[str, str]:
 
 def _is_exit(text: str) -> bool:
     return normalize(text).strip(" .,!?;:") in _EXIT_WORDS
+
+
+def _capture_kwargs(settings: Any) -> dict[str, Any]:
+    """Parâmetros VAD da captura vindos da configuração (testáveis)."""
+    return {
+        "silence_pad": settings.stt_capture_silence_pad,
+        "min_speech_duration": settings.stt_capture_min_speech_duration,
+        "abs_threshold": settings.stt_capture_abs_threshold,
+        "noise_floor_multiplier": settings.stt_capture_noise_floor_multiplier,
+        "frame_duration": settings.stt_capture_frame_duration,
+        "speech_confirm_frames": settings.stt_capture_speech_confirm_frames,
+    }
+
+
+def _choose_after_wake(
+    *,
+    full_text: str,
+    full_confidence: float,
+    full_suspicious: bool,
+    full_failed: bool,
+    wake_command: str,
+    wake_confidence: float,
+    min_command_confidence: float,
+) -> tuple[str, str]:
+    """Decide a origem do comando após o wake word, em ordem de confiança.
+
+    ``full`` → transcrição completa (small) confiável;
+    ``hint`` → comando do wake (tiny) SÓ quando a confiança do wake é forte
+    (≥ ``min_command_confidence``); uma ação externa nunca é executada a
+    partir de evidência fraca;
+    ``skip`` → nada é executado (pede repetição).
+    """
+    normalized_full = (full_text or "").strip()
+    if not full_failed and normalized_full and not full_suspicious:
+        if len(normalized_full.strip(" .,!?;:")) >= 2:
+            return "full", normalized_full
+    if wake_command and wake_confidence >= min_command_confidence:
+        return "hint", wake_command
+    return "skip", ""
 
 
 def _execution_payload(event: SystemEvent) -> dict[str, Any]:
@@ -183,10 +222,15 @@ class AvatarSession:
                 await self.push({"type": "pong"})
 
     async def _start_voice(self) -> None:
+        # Proteção de reentrada: apenas UMA task de voz por sessão. Mensagens
+        # "start" repetidas (ou um segundo clique durante o processamento) não
+        # criam um segundo loop nem uma segunda execução da mesma interação.
         if self._voice_task is None or self._voice_task.done():
             self._audio_abort.clear()
             self._interrupt_abort.clear()
             self._voice_task = asyncio.create_task(self._run_voice())
+        else:
+            logger.debug("[avatar] start voice ignored: loop already running")
 
     async def _set_interaction(self, active: bool, reason: str = "") -> None:
         await self.push({"type": "interaction", "state": "active" if active else "dormant", "reason": reason})
@@ -228,7 +272,7 @@ class AvatarSession:
                     self.event_bus.emit(EventType.assistant_listening)
                     active_before_capture = bool(self._interaction and self._interaction.active)
                     try:
-                        path = await asyncio.to_thread(audio_io.record_microphone_vad, max_wait=60.0, abort_event=self._audio_abort)
+                        path = await asyncio.to_thread(audio_io.record_microphone_vad, max_wait=60.0, **_capture_kwargs(settings), abort_event=self._audio_abort)
                     except audio_io.MicrophoneRecordingError as exc:
                         await self.push({"type": "error", "message": f"microfone indisponível: {exc}"})
                         return
@@ -238,7 +282,7 @@ class AvatarSession:
                     # O wake detector só tem autoridade quando a sessão está
                     # realmente dormente. Depois que ALPHA foi ativado, NÃO
                     # usamos o tiny novamente: a frase inteira vai para o
-                    # small CUDA para obter a maior acurácia possível.
+                    # small para obter a maior acurácia possível.
                     if settings.wake_word_enabled and not active_before_capture:
                         try:
                             wake_result = await pipeline.process_wake(path)
@@ -254,7 +298,7 @@ class AvatarSession:
                             logger.debug("[avatar] wake rejected text=%r confidence=%.3f suspicious=%s", wake_text, wake_confidence, wake_suspicious)
                             continue
                         await self._set_interaction(True, "wake_word")
-                        _, wake_command = strip_wake_word(wake_text, settings.wake_words)
+                        _, wake_command = strip_wake_prefix(wake_text, settings.wake_words)
                         wake_command = (wake_command or "").strip(" .,!?;:\n\t")
                         logger.info("[avatar] wake accepted word=%r confidence=%.3f command_hint=%r", wake_word, wake_confidence, wake_command)
                         # Se o usuário falou apenas o wake word, aguarde o
@@ -263,19 +307,48 @@ class AvatarSession:
                             continue
                         # Mesmo quando existe command_hint, a maior acurácia
                         # vem da transcrição full do small, não do tiny.
+                        full_failed = False
+                        full_text = ""
+                        full_confidence = 0.0
+                        full_suspicious = True
                         try:
                             result = await pipeline.process(path)
-                        except Exception as exc:
-                            logger.exception("[avatar] full transcription failed; using wake command hint")
-                            text = wake_command
+                        except Exception:
+                            full_failed = True
+                            logger.exception("[avatar] full transcription failed")
                         else:
-                            text = (result.get("transcription") or "").strip()
-                            confidence = float(result.get("confidence") or 0.0)
-                            suspicious = bool(result.get("is_suspicious"))
-                            normalized = normalize(text).strip(" .,!?;:")
-                            if suspicious or not normalized or len(normalized) < 2:
-                                logger.warning("[avatar] transcription rejected text=%r confidence=%.3f suspicious=%s", text, confidence, suspicious)
-                                text = wake_command
+                            full_text = (result.get("transcription") or "").strip()
+                            full_confidence = float(result.get("confidence") or 0.0)
+                            full_suspicious = bool(result.get("is_suspicious"))
+                        kind, text = _choose_after_wake(
+                            full_text=full_text,
+                            full_confidence=full_confidence,
+                            full_suspicious=full_suspicious,
+                            full_failed=full_failed,
+                            wake_command=wake_command,
+                            wake_confidence=wake_confidence,
+                            min_command_confidence=settings.wake_command_min_confidence,
+                        )
+                        if kind == "skip":
+                            logger.info(
+                                "[avatar] command skip wake_confidence=%.3f full_confidence=%.3f reason=insufficient_confidence",
+                                wake_confidence,
+                                full_confidence,
+                            )
+                            await self.push({"type": "caption", "from": "alpha", "text": "Pode repetir?"})
+                            continue
+                        if kind == "hint":
+                            logger.info(
+                                "[avatar] command source=hint wake_confidence=%.3f command=%r",
+                                wake_confidence,
+                                text,
+                            )
+                        else:
+                            logger.info(
+                                "[avatar] command source=full confidence=%.3f command=%r",
+                                full_confidence,
+                                text,
+                            )
                     else:
                         # Sessão ativa: uma única transcrição completa é a fonte
                         # de verdade para o comando do usuário.
@@ -331,8 +404,18 @@ class AvatarSession:
                     interrupted = await self._speak_interruptible(pipeline, response, emotion=self._emotion(answer))
                     if interrupted:
                         carry = interrupted
-                    elif self._interaction:
+                        continue
+                    if self._interaction:
                         self._interaction.touch_activity()
+                    cooldown = max(0.0, float(getattr(settings, "avatar_post_tts_cooldown_seconds", 0.35)))
+                    if cooldown > 0:
+                        await self.push({"type": "state", "state": "cooldown", "animation": "idle", "expression": None, "emotion": None, "idle_after_ms": max(50, int(cooldown * 1000))})
+                        try:
+                            await asyncio.wait_for(asyncio.sleep(cooldown), timeout=cooldown)
+                        except asyncio.TimeoutError:
+                            pass
+                    if not self.cancel_event.is_set():
+                        await self.push({"type": "state", "state": "listening", "animation": "idle", "expression": None, "emotion": None, "idle_after_ms": 0})
 
     @staticmethod
     def _emotion(answer: dict[str, Any]) -> EmotionState | None:
@@ -392,10 +475,6 @@ class AvatarSession:
             self._interruption_task = None
             energy_task.cancel()
             await asyncio.to_thread(audio_io.stop_wav_async, player)
-            if not self.cancel_event.is_set():
-                await self.push({"type": "state", "state": "listening", "animation": "idle", "expression": None, "emotion": None, "idle_after_ms": 0})
-                if self._interaction:
-                    self._interaction.touch_activity()
         return None
 
     async def _emit_speech_energy(self, audio_path: Path) -> None:
@@ -470,3 +549,20 @@ async def avatar_health() -> dict[str, str]:
 @router.get("/", include_in_schema=False)
 async def avatar_index() -> FileResponse:
     return FileResponse(UI_DIR / "index.html")
+
+
+def _resolve_ui_asset(asset_path: str) -> Path:
+    """Resolve um asset da UI bloqueando traversal (``..``) e caminhos fora do dir."""
+    normalized = (asset_path or "").replace("\\", "/")
+    if not normalized or normalized.startswith("/") or ".." in normalized.split("/"):
+        return UI_DIR / "index.html"
+    candidate = (UI_DIR / normalized).resolve()
+    if UI_DIR.resolve() not in candidate.parents or not candidate.is_file():
+        return UI_DIR / "index.html"
+    return candidate
+
+
+@router.get("/ui/{asset_path:path}", include_in_schema=False)
+async def avatar_asset(asset_path: str) -> FileResponse:
+    """Serve os assets estáticos da UI (app.js, astral.js, styles.css...)."""
+    return FileResponse(_resolve_ui_asset(asset_path))

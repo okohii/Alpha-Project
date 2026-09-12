@@ -126,7 +126,7 @@ class AssistantFacilitator:
     ) -> FacilitatorOutcome:
         intent.needs_clarification = True
         intent.clarification_reason = issue.reason
-        question = f"{issue.reason} Pode esclarecer?"
+        question = f"{issue.reason.rstrip('.?!; ')}. Pode esclarecer?"
         self.context.set_pending(
             request.conversation_id,
             PendingClarification(

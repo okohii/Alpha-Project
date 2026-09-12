@@ -16,9 +16,11 @@ class AvatarState(StrEnum):
     LISTENING = "listening"
     THINKING = "thinking"
     PLANNING = "planning"
+    PROCESSING = "processing"
     EXECUTING = "executing"
     VERIFYING = "verifying"
     SPEAKING = "speaking"
+    COOLDOWN = "cooldown"
     SUCCESS = "success"
     ERROR = "error"
 
@@ -34,8 +36,8 @@ SUCCESS_IDLE_DELAY_MS = 2000
 # apenas reflete. Quem emite (AgentCore, VoicePipeline) desconhece o avatar.
 EVENT_TO_STATE: dict[EventType, AvatarState] = {
     EventType.assistant_listening: AvatarState.LISTENING,
-    EventType.assistant_transcribing: AvatarState.LISTENING,
-    EventType.agent_started: AvatarState.THINKING,
+    EventType.assistant_transcribing: AvatarState.PROCESSING,
+    EventType.agent_started: AvatarState.PROCESSING,
     EventType.assistant_thinking: AvatarState.THINKING,
     EventType.agent_progress: AvatarState.PLANNING,
     EventType.tool_started: AvatarState.EXECUTING,

@@ -42,6 +42,16 @@ class OpenAICompatibleProvider:
         payload: dict[str, Any] = {"role": message.role, "content": message.content}
         if message.tool_call_id:
             payload["tool_call_id"] = message.tool_call_id
+        elif message.role == "tool" and isinstance(message.content, str):
+            # O envelope JSON do tool result carrega o ``tool_call_id``; o
+            # formato OpenAI exige o campo no TOPO da mensagem ``tool`` para o
+            # gateway conseguir correlacionar com o assistant(tool_calls).
+            try:
+                parsed = json.loads(message.content)
+                if isinstance(parsed, dict) and parsed.get("tool_call_id"):
+                    payload["tool_call_id"] = parsed["tool_call_id"]
+            except (TypeError, ValueError):
+                pass
         if message.tool_calls:
             payload["tool_calls"] = [
                 {

@@ -3,8 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+
+import httpx
 
 from app.core.config import get_settings
 from app.llm.base import LLMProvider
@@ -13,12 +17,62 @@ from app.llm.mock import MockLLMProvider
 from app.llm.ollama import OllamaProvider
 from app.llm.openai_compatible import OpenAICompatibleAPIError, OpenAICompatibleProvider
 
+# ── disponibilidade do Ollama (fallback local condicional) ────────────────
+# Cache curto: resultado OK vale ~5s, falha vale ~2s (para detectar rápido
+# quando o Ollama voltar). http_status do /api/tags é o probe canônico.
+_OLLAMA_HEALTH_CACHE: dict[str, tuple[float, bool]] = {}
+_OLLAMA_HEALTH_OK_TTL = 5.0
+_OLLAMA_HEALTH_FAIL_TTL = 2.0
+
+
+async def ollama_available(base_url: str | None) -> bool:
+    """Verifica se o Ollama responde em ``base_url`` (com cache curto)."""
+    if not base_url:
+        return False
+    now = time.monotonic()
+    cached = _OLLAMA_HEALTH_CACHE.get(base_url)
+    if cached:
+        ttl = _OLLAMA_HEALTH_OK_TTL if cached[1] else _OLLAMA_HEALTH_FAIL_TTL
+        if now - cached[0] < ttl:
+            return cached[1]
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            response = await client.get(f"{base_url.rstrip('/')}/api/tags")
+        ok = response.is_success
+    except Exception:
+        ok = False
+    _OLLAMA_HEALTH_CACHE[base_url] = (now, ok)
+    return ok
+
 
 class LLMRoute(StrEnum):
     local = "local"
     cloud = "cloud"
     auto = "auto"
     hybrid = "hybrid"
+
+
+@dataclass(slots=True)
+class RouteDecision:
+    """Resolução observável de rota do LLM para um turno.
+
+    Distingue explicitamente:
+
+    - ``configured_mode``: o que foi pedido na configuração (``LLM_MODE``);
+    - ``effective_mode``: o modo de fato usado após checagem de disponibilidade;
+    - ``selected_route``: ``local`` ou ``cloud`` — onde a PRIMEIRA chamada irá;
+    - ``fallback_reason``: por que a rota escolhida difere do modo configurado
+      (ex.: ``cloud_unavailable``, ``local_model_unavailable``).
+    """
+
+    configured_mode: str
+    effective_mode: str
+    selected_route: str
+    provider: LLMProvider
+    fallback_reason: str | None = None
+    cloud_available: bool = False
+    primary_model: str = ""
+    fallback_model: str | None = None
 
 
 class LLMRouter:
@@ -108,48 +162,114 @@ class LLMRouter:
             return self.settings.cloud_llm_enabled and bool(self.settings.cloud_llm_base_url)
         return bool(self.settings.gemini_api_key)
 
-    def choose(self, question: str | None = None) -> LLMProvider:
-        if question is None:
-            return self.local_provider
+    def resolve_route(self, question: str | None = None) -> RouteDecision:
+        """Resolve a rota efetiva para um turno com razão observável.
 
-        mode = self.settings.llm_mode
+        A rota NUNCA é ``cloud`` sem motivo explícito: ``mode_cloud``,
+        ``complex_task`` (auto/hybrid) — e sempre com fallback explícito
+        quando o provedor primário falhar.
+        """
+        mode = str(self.settings.llm_mode).lower()
         cloud_available = self._cloud_available()
-        complex_task = self._is_complex_task(question)
+        complex_task = bool(question) and self._is_complex_task(question)
+
+        def _provider_ftp(primary: LLMProvider, fallback: LLMProvider | None, selected: str, reason: str) -> LLMProvider:
+            if fallback is None:
+                return primary
+            return FaultTolerantProvider(
+                primary=primary,
+                fallback=fallback,
+                label=selected,
+                fallback_label="local" if selected == "cloud" else "cloud",
+                reason=reason,
+            )
 
         if mode == "cloud":
             if cloud_available:
-                self._logger.info("[LLM ROUTER] route=cloud reason=mode_cloud model=%s", self._provider_model(self.cloud_provider))
-                return FaultTolerantProvider(local=self.local_provider, cloud=self.cloud_provider)
-            self._logger.warning("[LLM ROUTER] route=local reason=cloud_unavailable")
-            return self.local_provider
+                decision = RouteDecision(
+                    configured_mode="cloud",
+                    effective_mode="cloud",
+                    selected_route="cloud",
+                    provider=_provider_ftp(self.cloud_provider, self.local_provider, "cloud", "mode_cloud"),
+                    fallback_reason=None,
+                    cloud_available=True,
+                    primary_model=self._provider_model(self.cloud_provider),
+                    fallback_model=self._provider_model(self.local_provider),
+                )
+            else:
+                decision = RouteDecision(
+                    configured_mode="cloud",
+                    effective_mode="local",
+                    selected_route="local",
+                    provider=self.local_provider,
+                    fallback_reason="cloud_unavailable",
+                    cloud_available=False,
+                    primary_model=self._provider_model(self.local_provider),
+                )
+            self._logger.info("[LLM ROUTER] route=%s reason=%s mode=%s model=%s configured_mode=cloud effective_mode=%s",
+                             decision.selected_route, decision.fallback_reason or "mode_cloud", mode,
+                             decision.primary_model, decision.effective_mode)
+            return decision
 
         if mode in {"auto", "hybrid"}:
             if cloud_available and self.settings.hybrid_cloud_for_complex and complex_task:
-                self._logger.info(
-                    "[LLM ROUTER] route=cloud reason=complex_task model=%s",
-                    self._provider_model(self.cloud_provider),
+                decision = RouteDecision(
+                    configured_mode=mode,
+                    effective_mode="cloud",
+                    selected_route="cloud",
+                    provider=_provider_ftp(self.cloud_provider, self.local_provider, "cloud", "complex_task"),
+                    fallback_reason=None,
+                    cloud_available=True,
+                    primary_model=self._provider_model(self.cloud_provider),
+                    fallback_model=self._provider_model(self.local_provider),
                 )
-                return FaultTolerantProvider(local=self.local_provider, cloud=self.cloud_provider)
-            self._logger.info(
-                "[LLM ROUTER] route=local reason=%s model=%s",
-                "simple_task" if not complex_task else "cloud_disabled_or_not_required",
-                self._provider_model(self.local_provider),
+                self._logger.info("[LLM ROUTER] route=cloud reason=complex_task mode=%s model=%s configured_mode=%s effective_mode=cloud",
+                                  mode, decision.primary_model, mode)
+                return decision
+            reason = "simple_task" if not complex_task else "cloud_disabled_or_not_required"
+            decision = RouteDecision(
+                configured_mode=mode,
+                effective_mode="local",
+                selected_route="local",
+                provider=_provider_ftp(self.local_provider, self.cloud_provider if cloud_available else None, "local", reason),
+                fallback_reason=reason,
+                cloud_available=cloud_available,
+                primary_model=self._provider_model(self.local_provider),
+                fallback_model=self._provider_model(self.cloud_provider) if cloud_available else None,
             )
-            return self.local_provider
+            self._logger.info("[LLM ROUTER] route=local reason=%s mode=%s model=%s", reason, mode, decision.primary_model)
+            return decision
 
-        self._logger.info("[LLM ROUTER] route=local reason=mode_local model=%s", self._provider_model(self.local_provider))
-        return self.local_provider
+        # modo local (default histórico do ALPHA)
+        decision = RouteDecision(
+            configured_mode="local",
+            effective_mode="local",
+            selected_route="local",
+            provider=_provider_ftp(self.local_provider, self.cloud_provider if cloud_available else None, "local", "mode_local"),
+            fallback_reason="mode_local",
+            cloud_available=cloud_available,
+            primary_model=self._provider_model(self.local_provider),
+            fallback_model=self._provider_model(self.cloud_provider) if cloud_available else None,
+        )
+        self._logger.info("[LLM ROUTER] route=local reason=mode_local mode=%s model=%s cloud_available=%s",
+                          mode, decision.primary_model, cloud_available)
+        return decision
+
+    def choose(self, question: str | None = None) -> LLMProvider:
+        return self.resolve_route(question).provider
 
     def route_name(self, question: str | None = None) -> str:
-        provider = self.choose(question)
-        if isinstance(provider, FaultTolerantProvider):
-            return "cloud"
-        return "local"
+        return self.resolve_route(question).selected_route
 
-    def describe_current(self) -> dict[str, str | bool | list[str]]:
-        provider = self.choose()
-        payload: dict[str, str | bool | list[str]] = {
+    def describe_current(self) -> dict[str, str | bool | list[str] | None]:
+        decision = self.resolve_route()
+        provider = decision.provider
+        payload: dict[str, str | bool | list[str] | None] = {
             "llm_mode": self.settings.llm_mode,
+            "configured_mode": decision.configured_mode,
+            "effective_mode": decision.effective_mode,
+            "selected_route": decision.selected_route,
+            "fallback_reason": decision.fallback_reason,
             "provider_name": provider.__class__.__name__,
             "allow_cloud_llm": self.settings.allow_cloud_llm,
             "cloud_llm_enabled": self.settings.cloud_llm_enabled,
@@ -159,48 +279,127 @@ class LLMRouter:
             "allow_web": self.settings.allow_web,
             "allowed_directories": [str(path) for path in self.settings.allowed_directories],
         }
-        if hasattr(provider, "model"):
-            payload["model"] = str(provider.model)
-        if hasattr(provider, "base_url"):
-            payload["base_url"] = str(provider.base_url)
+        model = getattr(provider, "model", None)
+        if model is None and isinstance(provider, FaultTolerantProvider):
+            model = getattr(provider.primary, "model", None)
+        if model is not None:
+            payload["model"] = str(model)
+        base_url = getattr(provider, "base_url", None)
+        if base_url is not None:
+            payload["base_url"] = str(base_url)
         return payload
 
 
 class FaultTolerantProvider:
+    """Provedor tolerante a falhas com rota primária e rota de fallback.
+
+    Trabalha em qualquer direção (cloud→local ou local→cloud) e expõe a rota
+    efetivamente selecionada via ``route`` / ``last_route`` / ``last_fallback_reason``.
+    ``local``/``cloud`` permanecem como atributos de compatibilidade para o Agent.
+
+    O fallback NUNCA é silencioso: quando a rota primária falha, um log com
+    ``fallback_reason=<route>_unavailable`` é emitido antes de tentar a rota
+    alternativa. O número de retries é limitado.
+    """
+
     RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
-    def __init__(self, local: LLMProvider, cloud: LLMProvider, max_retries: int = 1, base_backoff: float = 0.75) -> None:
-        self.local = local
-        self.cloud = cloud
+    def __init__(
+        self,
+        primary: LLMProvider,
+        fallback: LLMProvider | None = None,
+        label: str = "local",
+        fallback_label: str | None = None,
+        reason: str = "",
+        max_retries: int = 1,
+        base_backoff: float = 0.75,
+        local: LLMProvider | None = None,
+        cloud: LLMProvider | None = None,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.label = label
+        self.fallback_label = fallback_label or ("local" if label == "cloud" else "cloud")
+        self.reason = reason
         self.max_retries = max_retries
         self.base_backoff = base_backoff
+        self.last_route = label
+        self.last_fallback_reason: str | None = None
+        # Compatibilidade com o Agent (metadata/fallback inspecionáveis).
+        self.local = local if local is not None else (primary if label == "local" else fallback)
+        self.cloud = cloud if cloud is not None else (primary if label == "cloud" else fallback)
         self._logger = logging.getLogger("app.llm.fallback")
+        self._last_exc: Exception | None = None
 
-    async def complete(self, messages: list[Any], tools: list[dict[str, Any]] | None = None, temperature: float = 0.2):
+    @property
+    def route(self) -> str:
+        return self.last_route
+
+    def settings_fallback_enabled(self) -> bool:
+        return get_settings().hybrid_cloud_fallback
+
+    async def complete(
+        self,
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.2,
+    ):
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 if attempt:
                     await asyncio.sleep(self.base_backoff * (2 ** (attempt - 1)))
-                self._logger.info("[LLM ROUTER] provider=9router attempt=%d", attempt + 1)
-                return await self.cloud.complete(messages, tools=tools, temperature=temperature)
+                self._logger.info(
+                    "[LLM ROUTER] attempt route=%s provider=%s attempt=%d",
+                    self.label,
+                    self.primary.__class__.__name__,
+                    attempt + 1,
+                )
+                self.last_route = self.label
+                return await self.primary.complete(messages, tools=tools, temperature=temperature)
             except (GeminiAPIError, OpenAICompatibleAPIError) as exc:
                 last_exc = exc
                 if getattr(exc, "status_code", None) not in self.RETRYABLE_STATUS:
                     raise
-                self._logger.warning("Cloud transient error status=%s attempt=%d: %s", exc.status_code, attempt, exc)
+                self._logger.warning(
+                    "Cloud transient error status=%s attempt=%d: %s", exc.status_code, attempt, exc
+                )
             except Exception as exc:
                 last_exc = exc
-                self._logger.warning("Cloud provider failed attempt=%d: %s", attempt, exc)
+                self._logger.warning(
+                    "Primary provider (%s) failed attempt=%d: %s", self.label, attempt, exc
+                )
 
-        if not self.settings_fallback_enabled():
-            raise last_exc or RuntimeError("Cloud provider failed")
+        if self.fallback is None or not self.settings_fallback_enabled():
+            self._last_exc = last_exc
+            raise last_exc or RuntimeError("LLM provider failed")
 
+        # Fallback local é CONDICIONAL: só ocorre quando o Ollama está de pé.
+        # Se o modelo local não estiver disponível, o erro da rota primária
+        # é preservado (nunca mascarado por um fallback morto).
+        if self.fallback_label == "local" and getattr(self.fallback, "base_url", None):
+            if not await ollama_available(str(self.fallback.base_url)):
+                self.last_route = self.label
+                self.last_fallback_reason = "local_unavailable_ollama_down"
+                self._logger.warning(
+                    "[LLM ROUTER] fallback=local skipped reason=ollama_down final_route=%s final_error=%s",
+                    self.label,
+                    last_exc,
+                )
+                self._last_exc = last_exc
+                raise last_exc or RuntimeError("LLM provider failed")
+
+        self.last_route = self.fallback_label
+        self.last_fallback_reason = f"{self.label}_unavailable"
+        self._logger.warning(
+            "[LLM ROUTER] route=%s fallback_reason=%s_unavailable fallback_route=%s model=%s",
+            self.fallback_label,
+            self.label,
+            self.fallback_label,
+            getattr(self.fallback, "model", self.fallback.__class__.__name__),
+        )
         try:
-            self._logger.warning("[LLM ROUTER] cloud_unavailable fallback=local")
-            return await self.local.complete(messages, tools=tools, temperature=temperature)
+            return await self.fallback.complete(messages, tools=tools, temperature=temperature)
         except Exception as exc:
+            self._last_exc = last_exc
             raise last_exc or exc from exc
-
-    def settings_fallback_enabled(self) -> bool:
-        return get_settings().hybrid_cloud_fallback
