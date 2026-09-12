@@ -10,12 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _default_allowed_directories() -> list[Path]:
-    home = Path.home()
-    candidates = [Path.cwd(), home, home / "Downloads", home / "Documents", home / "Desktop"]
-    result: list[Path] = []
-    seen: set[str] = set()
+    home = Path.home(); candidates = [Path.cwd(), home, home / "Downloads", home / "Documents", home / "Desktop"]; result=[]; seen=set()
     for candidate in candidates:
-        try: resolved = candidate.expanduser().resolve()
+        try: resolved=candidate.expanduser().resolve()
         except OSError: continue
         if str(resolved) not in seen: seen.add(str(resolved)); result.append(resolved)
     return result
@@ -38,7 +35,7 @@ class Settings(BaseSettings):
     agent_max_tool_iterations: int = 8; agent_tool_timeout_seconds: float = 60.0; agent_history_limit: int = 12; agent_tool_selection: bool = True; agent_tool_selection_min_confidence: int = 1; agent_allow_write_default: bool = False; agent_auto_approve_sensitive: bool = False; agent_tool_result_strict: bool = True; agent_require_tool_verification: bool = False
     scheduler_enabled: bool = True; scheduler_interval_seconds: float = 15.0; code_exec_timeout_seconds: float = 30.0; allow_shell_exec: bool = False
     allowed_directories_env: str = Field(default="", validation_alias=AliasChoices("ALLOWED_DIRECTORIES","MANAGED_DIRECTORIES"), description="Diretórios permitidos separados por os.pathsep")
-    system_prompt_path: Path = Path("app/agent/prompts/system_prompt.pt-BR.txt"); log_level: str = "INFO"; debug_sensitive_logging: bool = False; offline_timeout_seconds: float = 2.5; llm_timeout_seconds: float = 120.0; web_timeout_seconds: float = 10.0; use_sqlite_for_tests: bool = False; overlay_host: str = "127.0.0.1"; overlay_port: int = 18080
+    system_prompt_path: Path = Path("app/agent/prompts/system_prompt.pt-BR.txt"); log_level: str = "DEBUG"; debug_sensitive_logging: bool = False; offline_timeout_seconds: float = 2.5; llm_timeout_seconds: float = 120.0; web_timeout_seconds: float = 10.0; use_sqlite_for_tests: bool = False; overlay_host: str = "127.0.0.1"; overlay_port: int = 18080
     avatar_size: int = 240; avatar_screen_mode: Literal["active","primary","fixed"] = "active"; avatar_screen_index: int = 0; avatar_margin: int = 24
     @property
     def allowed_directories(self) -> list[Path]:
@@ -54,5 +51,4 @@ class Settings(BaseSettings):
         return _default_allowed_directories()
 
 @lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    return Settings()
+def get_settings() -> Settings: return Settings()
