@@ -58,8 +58,7 @@ def _is_usable_text(text: str) -> bool:
 
 
 def _decoded_confidence(segments: list[dict[str, Any]], language_probability: float) -> float:
-    if not segments:
-        return 0.0
+    if not segments: return 0.0
     scores: list[float] = []
     for segment in segments:
         logprob = segment.get("avg_logprob")
@@ -89,6 +88,10 @@ class FasterWhisperSTT(SpeechToText):
         logger.info("[stt] model_ready")
         return self._model
 
+    async def warmup(self) -> None:
+        """Load the STT model before the first user command, outside the hot path."""
+        await __import__("asyncio").to_thread(self._load_model)
+
     async def transcribe(self, audio_path: Path, initial_prompt: str | None = None) -> TranscriptionResult:
         prompt = initial_prompt; model = self._load_model()
         try:
@@ -96,8 +99,6 @@ class FasterWhisperSTT(SpeechToText):
                 duration=wav.getnframes()/wav.getframerate() if wav.getframerate() else 0.0
                 logger.info("[stt] transcribe_start path=%s duration=%.2fs rate=%d frames=%d",audio_path,duration,wav.getframerate(),wav.getnframes())
         except Exception: duration=0.0
-        # record_microphone_vad already segments speech and keeps a pre-roll. Running
-        # Silero VAD a second time can discard short/quiet Portuguese utterances.
         transcribe_kwargs: dict[str, Any] = {"language":self.settings.stt_language,"initial_prompt":prompt or None,"condition_on_previous_text":False,"beam_size":max(1,int(self.settings.stt_beam_size)),"best_of":max(1,int(self.settings.stt_best_of)),"temperature":float(self.settings.stt_temperature),"vad_filter":False}
         logger.debug("[stt] decode_kwargs=%s",{k:v for k,v in transcribe_kwargs.items() if k!="initial_prompt"})
         segments, info = model.transcribe(str(audio_path), **transcribe_kwargs)
