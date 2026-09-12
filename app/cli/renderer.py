@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from rich.console import Console
@@ -12,6 +13,17 @@ from app.cli.events import render_event
 from app.cli.panels import banner_text, welcome_panel
 from app.cli.themes import Verbosity
 from app.core.events import EventType, SystemEvent
+
+
+_POSITIVE_CONFIRMATIONS = {
+    "s", "sim", "si", "y", "yes", "1", "pode", "permito", "permitir",
+    "autorizo", "autorizar", "ok", "okay", "pode sim", "pode salvar",
+    "pode executar", "pode fazer", "pode abrir", "pode usar",
+}
+_NEGATIVE_CONFIRMATIONS = {
+    "n", "não", "nao", "no", "0", "não pode", "nao pode", "não permitir",
+    "nao permitir", "não autorize", "nao autorize", "cancela", "cancelar",
+}
 
 
 class TerminalRenderer:
@@ -82,9 +94,29 @@ class TerminalRenderer:
     def error(self, message: str) -> None:
         self.console.print(f"[red]erro:[/red] {message}")
 
+    @staticmethod
+    def _normalize_confirmation(value: str) -> str:
+        value = re.sub(r"\s+", " ", value.strip().lower())
+        value = value.strip(".,!?;:")
+        return value
+
     def confirm(self, request: str) -> bool:
-        answer = Prompt.ask(f"[yellow]Permitir?[/yellow] {request} [dim][s/N][/dim]", default="n")
-        return answer.strip().lower() in ("s", "sim", "y", "yes", "1")
+        answer = Prompt.ask(
+            f"[yellow]Permitir?[/yellow] {request} [dim][s/N][/dim]",
+            default="n",
+        )
+        normalized = self._normalize_confirmation(answer)
+        if normalized in _NEGATIVE_CONFIRMATIONS:
+            return False
+        if normalized in _POSITIVE_CONFIRMATIONS:
+            return True
+        # Aceita frases curtas afirmativas sem deixar 'não pode' passar.
+        tokens = set(normalized.split())
+        if tokens & {"não", "nao", "no", "nunca", "cancelar", "cancela"}:
+            return False
+        if tokens & {"sim", "pode", "permitir", "permito", "autorizo", "autorizar"}:
+            return True
+        return False
 
     async def confirm_async(self, request: str) -> bool:
         try:
