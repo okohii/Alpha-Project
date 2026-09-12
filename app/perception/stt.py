@@ -57,7 +57,7 @@ def _is_usable_text(text: str) -> bool:
 
 
 class FasterWhisperSTT(SpeechToText):
-    """STT using Faster-Whisper with a latency-oriented decoding profile."""
+    """STT using Faster-Whisper; audio segmentation is owned by ALPHA's capture VAD."""
     def __init__(self) -> None:
         self.settings = get_settings(); self._model = None
 
@@ -78,14 +78,16 @@ class FasterWhisperSTT(SpeechToText):
                 duration=wav.getnframes()/wav.getframerate() if wav.getframerate() else 0.0
                 logger.info("[stt] transcribe_start path=%s duration=%.2fs rate=%d frames=%d",audio_path,duration,wav.getframerate(),wav.getnframes())
         except Exception: duration=0.0
-        transcribe_kwargs: dict[str, Any] = {"language":self.settings.stt_language,"initial_prompt":prompt or None,"condition_on_previous_text":False,"beam_size":max(1,int(self.settings.stt_beam_size)),"best_of":max(1,int(self.settings.stt_best_of)),"temperature":float(self.settings.stt_temperature),"vad_filter":bool(self.settings.stt_vad_filter)}
-        if transcribe_kwargs["vad_filter"]: transcribe_kwargs["vad_parameters"]={"min_silence_duration_ms":max(100,int(self.settings.stt_vad_min_silence_ms))}
+        # record_microphone_vad already segments speech and keeps a pre-roll. Running
+        # Silero VAD a second time can discard short/quiet Portuguese utterances.
+        transcribe_kwargs: dict[str, Any] = {"language":self.settings.stt_language,"initial_prompt":prompt or None,"condition_on_previous_text":False,"beam_size":max(1,int(self.settings.stt_beam_size)),"best_of":max(1,int(self.settings.stt_best_of)),"temperature":float(self.settings.stt_temperature),"vad_filter":False}
         logger.debug("[stt] decode_kwargs=%s",{k:v for k,v in transcribe_kwargs.items() if k!="initial_prompt"})
         segments, info = model.transcribe(str(audio_path), **transcribe_kwargs)
-        confidence = float(getattr(info,"language_probability",1.0) or 1.0)
         collected=[]; text_parts=[]
         for segment in segments:
-            collected.append({"start":segment.start,"end":segment.end,"text":segment.text}); text_parts.append(segment.text)
-        text="".join(text_parts).strip(); usable=_is_usable_text(text); text_len=len(_ALNUM_RE.sub("",text)); is_suspicious=(not usable) or (confidence<0.3 and text_len<3) or (text_len>0 and confidence<0.5)
+            collected.append({"start":segment.start,"end":segment.end,"text":segment.text,"avg_logprob":getattr(segment,"avg_logprob",None),"no_speech_prob":getattr(segment,"no_speech_prob",None)}); text_parts.append(segment.text)
+        text="".join(text_parts).strip(); usable=_is_usable_text(text); text_len=len(_ALNUM_RE.sub("",text))
+        confidence = float(getattr(info,"language_probability",1.0) or 1.0) if collected else 0.0
+        is_suspicious=(not usable) or (confidence<0.3 and text_len<3) or (text_len>0 and confidence<0.5)
         logger.info("[stt] transcribe_end duration=%.2fs text=%r confidence=%.3f usable=%s suspicious=%s segments=%d",duration,text,confidence,usable,is_suspicious,len(collected))
         return TranscriptionResult(text=text,language=info.language or self.settings.stt_language,segments=collected,confidence=confidence,is_suspicious=is_suspicious,is_usable=usable)
