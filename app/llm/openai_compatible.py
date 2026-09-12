@@ -23,14 +23,17 @@ class OpenAICompatibleAPIError(RuntimeError):
 class OpenAICompatibleProvider:
     """Provider for OpenAI-compatible gateways such as 9Router.
 
-    ALPHA talks only to the gateway. Provider/account fallback stays outside
-    ALPHA, which keeps the agent independent from any individual cloud vendor.
+    ALPHA talks only to the gateway. Provider/account/model selection remains
+    outside ALPHA. ``alpha`` is used as the default 9Router combo/profile when
+    no explicit gateway model is configured.
     """
+
+    DEFAULT_GATEWAY_MODEL = "alpha"
 
     def __init__(self, api_key: str | None = None, model: str | None = None, base_url: str | None = None) -> None:
         settings = get_settings()
         self.api_key = api_key if api_key is not None else settings.cloud_llm_api_key
-        self.model = model or settings.cloud_llm_model
+        self.model = model or settings.cloud_llm_model or self.DEFAULT_GATEWAY_MODEL
         self.base_url = (base_url or settings.cloud_llm_base_url).rstrip("/")
         self.timeout = settings.cloud_llm_timeout_seconds
 
@@ -69,8 +72,6 @@ class OpenAICompatibleProvider:
     ) -> LLMResponse:
         if not self.base_url:
             raise RuntimeError("CLOUD_LLM_BASE_URL não configurada")
-        if not self.model:
-            raise RuntimeError("CLOUD_LLM_MODEL não configurado")
 
         payload: dict[str, Any] = {
             "model": self.model,
@@ -85,7 +86,7 @@ class OpenAICompatibleProvider:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         url = f"{self.base_url}/chat/completions"
-        logger.debug("Enviando requisição OpenAI-compatible: model=%s url=%s", self.model, url)
+        logger.info("[9ROUTER] POST %s model=%s tools=%s", url, self.model, bool(tools))
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(url, json=payload, headers=headers)
