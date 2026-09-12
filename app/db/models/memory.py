@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import Float, Index, String, Text
+from sqlalchemy import DateTime, Float, Index, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,8 +27,10 @@ class Memory(Base, TimestampMixin):
     memory_type: Mapped[str] = mapped_column(String(64), index=True)
     source: Mapped[str] = mapped_column(String(128), default="chat")
     importance: Mapped[float] = mapped_column(Float, default=0.0)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
     embedding: Mapped[list[float] | None] = mapped_column(VECTOR_COLUMN_TYPE, nullable=True)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_COLUMN_TYPE, default=dict)
+    expiration: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 if USE_POSTGRES:
