@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
+_DEFAULT_WAKE_WORDS = ("alpha", "alfa")
+
 
 def normalize(text: str) -> str:
     lower = (text or "").strip().lower()
@@ -13,11 +15,15 @@ def normalize(text: str) -> str:
 
 def _tokenize_words(raw_words: str | list[str] | None) -> list[str]:
     if not raw_words:
-        return []
-    if isinstance(raw_words, str):
+        parts = list(_DEFAULT_WAKE_WORDS)
+    elif isinstance(raw_words, str):
         parts = [part.strip() for part in raw_words.split(",") if part.strip()]
     else:
         parts = [str(part).strip() for part in raw_words if str(part).strip()]
+
+    # ALPHA must always respond to both spellings, even when an older .env
+    # still contains only WAKE_WORDS=alpha.
+    parts.extend(_DEFAULT_WAKE_WORDS)
     normalized = {normalize(part) for part in parts if normalize(part)}
     return sorted(normalized, key=len, reverse=True)
 
@@ -34,7 +40,6 @@ def find_wake_word(text: str, raw_words: str | list[str] | None) -> str | None:
     for word in _tokenize_words(raw_words):
         if not word:
             continue
-        # Palavra isolada (fronteira de palavra) para evitar casar "alpha" em "alfalfa".
         pattern = rf"(^|[^\w]){_escape_regex(word)}([^\w]|$)"
         if re.search(pattern, normalized_text):
             return word
