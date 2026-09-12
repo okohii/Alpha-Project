@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from app.core.config import get_settings
@@ -27,15 +28,6 @@ class SpeechToText(ABC):
 
 
 def _determine_stt_device(settings_device: str) -> str:
-    """Determine the actual STT device based on settings and available hardware.
-
-    Args:
-        settings_device: Device string from settings ("auto", "cuda", "cpu").
-
-    Returns:
-        "cuda" if NVIDIA GPU is available and requested,
-        "cpu" otherwise.
-    """
     if settings_device == "cpu":
         return "cpu"
     if settings_device in ("auto", "cuda"):
@@ -43,10 +35,10 @@ def _determine_stt_device(settings_device: str) -> str:
 
         try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,no-headers"],
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,no-header"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=2,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return "cuda"
@@ -56,22 +48,13 @@ def _determine_stt_device(settings_device: str) -> str:
 
 
 def _compute_type_for_device(compute_type: str, device: str) -> str:
-    """Resolve the compute type for the given device.
-
-    Args:
-        compute_type: The requested compute type ("auto", "int8", "float16", etc.).
-        device: The target device ("cuda" or "cpu").
-
-    Returns:
-        The effective compute type suitable for the device.
-    """
     if device == "cuda":
         return "float16" if compute_type == "auto" else compute_type
     return "int8" if compute_type == "auto" else compute_type
 
 
 class FasterWhisperSTT(SpeechToText):
-    """STT using Faster-Whisper with device selection and improved options."""
+    """STT using Faster-Whisper with a latency-oriented decoding profile."""
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -99,39 +82,30 @@ class FasterWhisperSTT(SpeechToText):
     async def transcribe(
         self, audio_path: Path, initial_prompt: str | None = None
     ) -> TranscriptionResult:
-        # Only use initial_prompt if explicitly provided by the caller.
-        # A generic default prompt biases short commands, so we ignore
-        # the settings default unless the caller supplies one.
         prompt = initial_prompt
-
         model = self._load_model()
 
-        # Use condition_on_previous_text=False for short commands to avoid
-        # carry-over context from previous transcriptions.
-        segments, info = model.transcribe(
-            str(audio_path),
-            language=self.settings.stt_language,
-            initial_prompt=prompt or None,
-            condition_on_previous_text=False,
-        )
+        transcribe_kwargs: dict[str, Any] = {
+            "language": self.settings.stt_language,
+            "initial_prompt": prompt or None,
+            "condition_on_previous_text": False,
+            "beam_size": max(1, int(self.settings.stt_beam_size)),
+            "best_of": max(1, int(self.settings.stt_best_of)),
+            "temperature": float(self.settings.stt_temperature),
+            "vad_filter": bool(self.settings.stt_vad_filter),
+        }
+        if transcribe_kwargs["vad_filter"]:
+            transcribe_kwargs["vad_parameters"] = {
+                "min_silence_duration_ms": max(100, int(self.settings.stt_vad_min_silence_ms)),
+            }
 
-        # Extract confidence from info if available
+        segments, info = model.transcribe(str(audio_path), **transcribe_kwargs)
+
         confidence = 1.0
         if hasattr(info, "language_probability") and info.language_probability is not None:
             confidence = float(info.language_probability)
         elif hasattr(info, "avg_logprob") and info.avg_logprob is not None:
             confidence = max(float(info.avg_logprob), 0.0)
-
-        # Detect suspicious transcriptions (very low confidence, very short text,
-        # or language mismatch) to flag potentially erroneous results.
-        is_suspicious = False
-        text = (info.language or self.settings.stt_language) or "pt"
-        text_len = len(info.text) if hasattr(info, "text") else 0
-
-        if confidence < 0.3 and text_len < 3:
-            is_suspicious = True
-        elif text_len > 0 and confidence < 0.5:
-            is_suspicious = True
 
         collected = []
         text_parts = []
@@ -141,8 +115,12 @@ class FasterWhisperSTT(SpeechToText):
             )
             text_parts.append(segment.text)
 
+        text = "".join(text_parts).strip()
+        text_len = len(text)
+        is_suspicious = (confidence < 0.3 and text_len < 3) or (text_len > 0 and confidence < 0.5)
+
         return TranscriptionResult(
-            text="".join(text_parts).strip(),
+            text=text,
             language=info.language or self.settings.stt_language,
             segments=collected,
             confidence=confidence,
