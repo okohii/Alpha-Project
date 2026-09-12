@@ -143,9 +143,9 @@ def _vad_webrtc(samples: np.ndarray, sample_rate: int, vad: Any) -> bool:
 def record_microphone_vad(
     device: str | int | None = None,
     sample_rate: int = SAMPLE_RATE,
-    pre_roll_duration: float = 0.20,
-    silence_pad: float = 0.45,
-    min_speech_duration: float = 0.25,
+    pre_roll_duration: float = 0.35,
+    silence_pad: float = 0.80,
+    min_speech_duration: float = 0.40,
     max_wait: float = 60.0,
     abs_threshold: float = 300.0,
     noise_floor_multiplier: float = 2.5,
@@ -156,7 +156,7 @@ def record_microphone_vad(
     on_speech_start: Callable[[], None] | None = None,
     abort_event: threading.Event | None = None,
 ) -> Path | None:
-    """Grava fala com detecção de silêncio otimizada para baixa latência."""
+    """Grava fala com VAD tolerante a pausas naturais e início imediato da fala."""
     try:
         import sounddevice
     except Exception as exc:  # pragma: no cover
@@ -169,7 +169,7 @@ def record_microphone_vad(
 
     device_index = _resolve_device(device)
     blocksize = max(1, int(sample_rate * frame_duration))
-    frames_queue: Any = queue.Queue(maxsize=64)
+    frames_queue: Any = queue.Queue(maxsize=128)
 
     pre_roll_frames = max(1, round(pre_roll_duration / frame_duration))
     pre_roll_buffer: list[np.ndarray] = []
@@ -192,7 +192,9 @@ def record_microphone_vad(
     noise_samples: list[float] = []
     speech_chunks: list[np.ndarray] = []
     speech_started = False
+    speech_started_at: float | None = None
     threshold = abs_threshold
+    pre_roll_at_start: list[np.ndarray] = []
 
     stream = sounddevice.InputStream(
         samplerate=sample_rate,
@@ -203,6 +205,7 @@ def record_microphone_vad(
         callback=callback,
         latency="low",
     )
+    capture_started_at = time.monotonic()
     with stream:
         confirming_frames = 0
         silent_frames = 0
@@ -230,18 +233,26 @@ def record_microphone_vad(
                 is_voice = _vad_webrtc(sample, sample_rate, webrtc_vad)
             else:
                 if len(noise_samples) < 4:
-                    noise_samples.append(rms)
-                    continue
+                    # Never use an obvious speech-level frame to calibrate the noise floor.
+                    if rms < abs_threshold:
+                        noise_samples.append(rms)
+                    if len(noise_samples) < 4:
+                        # Keep listening while preserving this frame in the rolling pre-roll.
+                        continue
                 if len(noise_samples) == 4:
                     noise_floor = float(np.percentile(np.asarray(noise_samples), 10))
                     threshold = _vad_threshold(noise_floor, abs_threshold, noise_floor_multiplier)
+                    noise_samples.append(noise_floor)  # mark calibration as complete
                 is_voice = rms >= threshold
 
             if not speech_started:
                 confirming_frames = confirming_frames + 1 if is_voice else 0
                 if confirming_frames >= speech_confirmed:
                     speech_started = True
+                    speech_started_at = time.monotonic()
                     silent_frames = 0
+                    pre_roll_at_start = [chunk.copy() for chunk in pre_roll_buffer]
+                    speech_chunks = [sample.copy()]
                     if on_speech_start is not None:
                         on_speech_start()
             else:
@@ -249,20 +260,29 @@ def record_microphone_vad(
                     silent_frames = 0
                 else:
                     silent_frames += 1
-                    if silent_frames >= silence_frames_needed:
+                    speech_duration = time.monotonic() - (speech_started_at or time.monotonic())
+                    if silent_frames >= silence_frames_needed and speech_duration >= min_speech_duration:
                         break
-
-            if speech_started:
-                speech_chunks.append(sample)
+                speech_chunks.append(sample.copy())
 
             if time.monotonic() >= deadline:
                 break
 
-    all_chunks = (pre_roll_buffer + speech_chunks) if speech_started and pre_roll_buffer else speech_chunks
-    if len(all_chunks) < speech_frames_min:
+    if not speech_started or len(speech_chunks) < speech_frames_min:
+        logger_duration = time.monotonic() - capture_started_at
+        print(f"[audio] capture_discarded duration={logger_duration:.2f}s speech_started={speech_started}", flush=True)
         return None
 
+    # The rolling pre-roll already contains frames that may also be in speech_chunks.
+    # Deduplicate by using the snapshot from the exact speech-start boundary only.
+    all_chunks = pre_roll_at_start + speech_chunks
     frames = b"".join(chunk.astype(np.int16).tobytes() for chunk in all_chunks)
+    duration = len(frames) / (2 * sample_rate)
+    print(
+        f"[audio] captured={duration:.2f}s speech_frames={len(speech_chunks)} "
+        f"threshold={threshold:.1f}",
+        flush=True,
+    )
     return _save_wav(frames, sample_rate)
 
 
