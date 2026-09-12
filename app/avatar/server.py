@@ -74,7 +74,9 @@ class AvatarSession:
         self._confirm_queue: asyncio.Queue[bool] = asyncio.Queue()
         self.cancel_event = asyncio.Event()
         self._audio_abort = threading.Event()
+        self._interrupt_abort = threading.Event()
         self._voice_task: asyncio.Task[Any] | None = None
+        self._interruption_task: asyncio.Task[str | None] | None = None
         self.conversation_id: str | None = None
         self._interaction: InteractionManager | None = None
 
@@ -126,6 +128,35 @@ class AvatarSession:
                 await self._confirm_queue.put(False)
                 return
 
+    async def _listen_for_interruption(self, pipeline: VoicePipeline, max_wait: float) -> str | None:
+        """Listen during TTS and return a usable user utterance as soon as one is decoded."""
+        try:
+            path = await asyncio.to_thread(
+                audio_io.record_microphone_vad,
+                max_wait=max(0.5, max_wait),
+                pre_roll_duration=0.25,
+                silence_pad=0.30,
+                min_speech_duration=0.25,
+                speech_confirm_frames=2,
+                abort_event=self._interrupt_abort,
+            )
+        except audio_io.MicrophoneRecordingError:
+            return None
+        if path is None or self.cancel_event.is_set() or self._interrupt_abort.is_set():
+            return None
+        try:
+            result = await pipeline.process(path)
+        except Exception:
+            return None
+        text = (result.get("transcription") or "").strip()
+        confidence = float(result.get("confidence") or 0.0)
+        suspicious = bool(result.get("is_suspicious"))
+        normalized = normalize(text).strip(" .,!?;:")
+        if suspicious or len(normalized) < 2:
+            logger.info("[avatar] interruption rejected text=%r confidence=%.3f suspicious=%s", text, confidence, suspicious)
+            return None
+        return text
+
     async def permission_request(self, candidate: str) -> bool:
         display = _parse_confirmation_candidate(candidate)
         await self.push({"type": "confirmation", "kind": display["kind"], "tool": display["tool"], "arguments": display["arguments"]})
@@ -156,6 +187,7 @@ class AvatarSession:
             elif action == "close":
                 self.cancel_event.set()
                 self._audio_abort.set()
+                self._interrupt_abort.set()
             elif action == "ping":
                 await self.push({"type": "pong"})
 
@@ -235,36 +267,61 @@ class AvatarSession:
                 response = clean_markdown_artifacts(answer["response"])
                 await self.push({"type": "caption", "from": "alpha", "text": response})
                 if response:
-                    await self._speak_interruptible(pipeline, response, emotion=self._emotion(answer))
+                    interrupted = await self._speak_interruptible(pipeline, response, emotion=self._emotion(answer))
+                    if interrupted:
+                        carry = interrupted
+                    elif self._interaction:
+                        self._interaction.touch_activity()
 
     @staticmethod
     def _emotion(answer: dict[str, Any]) -> EmotionState | None:
         payload = answer.get("emotion")
         return EmotionState.from_dict(payload) if isinstance(payload, dict) else None
 
-    async def _speak_interruptible(self, pipeline: VoicePipeline, text: str, emotion: EmotionState | None) -> None:
+    async def _speak_interruptible(self, pipeline: VoicePipeline, text: str, emotion: EmotionState | None) -> str | None:
         result = await pipeline.speak_expressive(text, emotion=emotion)
         if result.get("status") != "ok":
             await self.push({"type": "error", "message": str(result.get("detail") or "tts indisponível")})
-            return
+            return None
         audio_path = Path(result["audio_path"])
         try:
             player, frame_rate, n_frames = await asyncio.to_thread(audio_io.play_wav_async, audio_path)
         except audio_io.AudioPlaybackError as exc:
             await self.push({"type": "error", "message": f"áudio indisponível: {exc}"})
-            return
+            return None
 
         duration = n_frames / frame_rate if frame_rate else 0.0
         await self.push({"type": "avatar_show", "animation": "speak", "duration_ms": max(320, int(duration * 1000))})
         await self.push({"type": "state", "state": "speaking", "animation": "speak", "expression": None, "emotion": emotion.to_dict() if emotion else None, "idle_after_ms": max(320, int(duration * 1000))})
         energy_task = asyncio.create_task(self._emit_speech_energy(audio_path))
+        self._interrupt_abort.clear()
+        self._interruption_task = asyncio.create_task(self._listen_for_interruption(pipeline, duration + 0.5))
+        interrupted_text: str | None = None
         try:
-            await asyncio.sleep(duration + 0.25)
+            done, _ = await asyncio.wait({self._interruption_task, asyncio.create_task(asyncio.sleep(duration + 0.25))}, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if task is self._interruption_task:
+                    interrupted_text = task.result()
+                    if interrupted_text:
+                        logger.info("[avatar] TTS interrompido por fala: %r", interrupted_text)
+                        await asyncio.to_thread(audio_io.stop_wav_async, player)
+                        break
+            if interrupted_text:
+                return interrupted_text
+            await asyncio.sleep(0)
         finally:
+            self._interrupt_abort.set()
+            if self._interruption_task is not None and not self._interruption_task.done():
+                self._interruption_task.cancel()
+                await asyncio.gather(self._interruption_task, return_exceptions=True)
+            self._interruption_task = None
             energy_task.cancel()
             await asyncio.to_thread(audio_io.stop_wav_async, player)
             if not self.cancel_event.is_set():
                 await self.push({"type": "state", "state": "listening", "animation": "idle", "expression": None, "emotion": None, "idle_after_ms": 0})
+                if self._interaction:
+                    self._interaction.touch_activity()
+        return interrupted_text
 
     async def _emit_speech_energy(self, audio_path: Path) -> None:
         try:
@@ -315,6 +372,7 @@ async def avatar_ws(websocket: WebSocket) -> None:
     finally:
         session.cancel_event.set()
         session._audio_abort.set()
+        session._interrupt_abort.set()
         if session._voice_task is not None:
             session._voice_task.cancel()
         confirmation_task = getattr(session, "_confirmation_voice_task", None)
