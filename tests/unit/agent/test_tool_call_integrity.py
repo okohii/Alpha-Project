@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from app.agent.serialized import SerializedAgentCore
-from app.llm.base import LLMMessage, LLMResponse, ToolCall
+from app.llm.base import ExecutionEvidence, LLMMessage, LLMResponse, ToolCall
 
 
 class FakeProvider:
@@ -93,3 +93,37 @@ async def test_textual_tool_intent_is_not_executed_if_retry_still_has_no_call(ag
 def test_serialized_agent_does_not_expand_skill_catalog_after_tool_call(agent):
     allowed = {"web_search", "browser_text"}
     assert agent._expand_tools(allowed, ["web_search", "browser_text"]) == allowed
+
+
+def test_open_url_does_not_verify_weather_claim(agent):
+    evidence = [
+        ExecutionEvidence(
+            action_id="1",
+            tool="open_url",
+            arguments={"url": "https://example.test"},
+            executed_at="now",
+            success=True,
+            result={"url": "https://example.test"},
+        )
+    ]
+    result = agent._apply_honesty_gate(
+        "Aqui está a previsão do tempo para hoje.", evidence
+    )
+    assert "não consegui verificar" in result.lower()
+
+
+def test_web_search_allows_weather_claim_to_reach_normal_honesty_gate(agent):
+    evidence = [
+        ExecutionEvidence(
+            action_id="1",
+            tool="web_search",
+            arguments={"query": "previsão do tempo hoje"},
+            executed_at="now",
+            success=True,
+            result={"results": [{"title": "Previsão", "snippet": "25 °C"}]},
+        )
+    ]
+    result = agent._apply_honesty_gate(
+        "Encontrei a previsão do tempo para hoje.", evidence
+    )
+    assert result == "Encontrei a previsão do tempo para hoje."
