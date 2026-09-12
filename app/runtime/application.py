@@ -9,7 +9,7 @@ from typing import Any
 from app.agent.serialized import SerializedAgentCore
 from app.calendar.service import CalendarRepository, CalendarService
 from app.core.config import get_settings
-from app.llm.ollama import OllamaProvider
+from app.llm.configured_ollama import ConfiguredOllamaProvider
 from app.llm.router import LLMRouter
 from app.memory.embeddings import LocalEmbeddingProvider
 from app.memory.repository import MemoryRepository
@@ -51,17 +51,15 @@ async def build_agent(
         managed_path_repository=managed_path_repository,
         file_manager=file_manager,
     )
-
     reminder_service = ReminderService(ReminderRepository(session))
 
     try:
         calendar_service = CalendarService(CalendarRepository(session))
-    except Exception:  # noqa: BLE001 - serviço opcional não derruba o agente
+    except Exception:
         calendar_service = None
 
     def _document_indexer_factory() -> Any:
         from app.documents.indexer import DocumentIndexer, DocumentRepository
-
         return DocumentIndexer(
             file_manager=file_manager,
             repository=DocumentRepository(session),
@@ -103,24 +101,10 @@ async def build_agent(
         )
 
     async def _permission_request(candidate: str) -> bool:
-        """Handler único de confirmação de permissão.
-
-        Dois fluxos distintos passam por aqui, diferenciados por um prefixo
-        estrutural (NÃO por heurística de formato):
-
-        1. Confirmação de action      → candidate inicia com ``SENSITIVE_PREFIX``
-           (tools sensíveis/arriscadas: ``"tool_name: {args_json}"``).
-
-        2. AccessDeniedError         → candidate é um caminho de filesystem.
-        """
         if permission_prompt is None:
             return False
         is_action_confirmation = candidate.startswith(SENSITIVE_PREFIX)
-        display = (
-            candidate[len(SENSITIVE_PREFIX) :]
-            if is_action_confirmation
-            else candidate
-        )
+        display = candidate[len(SENSITIVE_PREFIX):] if is_action_confirmation else candidate
         granted = await permission_prompt(display)
         if not granted:
             return False
@@ -130,21 +114,17 @@ async def build_agent(
         if normalized not in file_manager.allowed_directories:
             file_manager.allowed_directories.append(normalized)
         await task_service.register_allowed_path(
-            path=str(normalized),
-            entry_type="directory",
-            source="permission_request",
+            path=str(normalized), entry_type="directory", source="permission_request"
         )
         return True
 
     return SerializedAgentCore(
-        llm_router=LLMRouter(local_provider=OllamaProvider()),
+        llm_router=LLMRouter(local_provider=ConfiguredOllamaProvider()),
         tool_registry=tool_registry,
         memory_service=memory_service,
         allowed_directories=[str(path) for path in allowed_directories],
         permission_request_handler=_permission_request,
-        allowed_directories_resolver=lambda: [
-            str(path) for path in file_manager.allowed_directories
-        ],
+        allowed_directories_resolver=lambda: [str(path) for path in file_manager.allowed_directories],
         db_session=session,
         event_bus=event_bus,
         cancel_event=cancel_event,
