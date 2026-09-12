@@ -54,10 +54,11 @@ _STRICT_TOOLS = frozenset({
     "mouse_click", "mouse_scroll", "type_text", "press_key", "click_text",
     "run_shell", "run_code", "task_execute", "procedure_run", "macro_run",
 })
+_OBSERVATION_TOOLS = frozenset({"time", "system_info", "memory_search", "screenshot", "verify_screen"})
 
 
 class ReliableAgentCore(SerializedAgentCore):
-    """Facade final: complexity gate, plano executável e verificação pós-ação."""
+    """Facade final: complexity gate, plano sequencial e verificação pós-ação."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -101,8 +102,7 @@ class ReliableAgentCore(SerializedAgentCore):
             if skill_name:
                 planned.update(self.skill_registry.get_tools_for_skills([skill_name]))
         planned &= names | {"verify_screen"}
-        observability = {"time", "system_info", "memory_search", "screenshot", "verify_screen"}
-        narrowed = (names & observability) | planned
+        narrowed = (names & _OBSERVATION_TOOLS) | planned
         return narrowed or names
 
     def _expand_tools(self, allowed: set[str], called: list[str]) -> set[str]:
@@ -110,19 +110,18 @@ class ReliableAgentCore(SerializedAgentCore):
         step = self._plan_pending_step()
         if step is None:
             return expanded
-        # Só o passo atual e as ferramentas da mesma skill podem avançar o plano.
         if self.skill_registry is not None:
             skill_name = self.skill_registry.skill_for_tool(step.tool_hint)
             if skill_name:
                 expanded.update(self.skill_registry.get_tools_for_skills([skill_name]))
         expanded.add(step.tool_hint)
-        expanded.update({"screenshot", "verify_screen", "time", "system_info", "memory_search"} & set(self.tool_registry.tools))
+        expanded.update(_OBSERVATION_TOOLS & set(self.tool_registry.tools))
         return expanded
 
     async def _provider_turn(self, provider: LLMProvider, messages: list[LLMMessage], tools: list[dict[str, Any]], stream_tokens: bool) -> LLMResponse:
         if self._complexity.level is Complexity.SIMPLE:
             return await super()._provider_turn(provider, messages, tools, stream_tokens)
-        guidance = LLMMessage(role="system", content=("GATE DE EXECUÇÃO: classifique o estado antes de concluir. " f"complexidade={self._complexity.level.value}. Use tool calling nativo. " "Considere ações apenas EXECUTADAS até haver evidência de pós-condição. Não alegue conclusão sem evidência."))
+        guidance = LLMMessage(role="system", content=("GATE DE EXECUÇÃO: classifique o estado antes de concluir. " f"complexidade={self._complexity.level.value}. Use tool calling nativo. " "Considere ações apenas EXECUTADAS até haver evidência de pós-condição. Depois de uma falha ou verificação incerta, a próxima tentativa deve mudar a estratégia: ferramenta alternativa, alvo/argumentos diferente ou nova observação. Nunca repita cegamente a mesma chamada."))
         enriched = list(messages)
         enriched.insert(1 if enriched and enriched[0].role == "system" else 0, guidance)
         return await super()._provider_turn(provider, enriched, tools, stream_tokens)
@@ -157,6 +156,13 @@ class ReliableAgentCore(SerializedAgentCore):
         self._emit(EventType.task_step_completed, {"step_id": step.id, "tool": tool_name, "attempts": step.attempts, "verified": execution.verified})
 
     async def _execute_tool(self, tool_call, permissions, conversation_id, allowed_names):
+        step = self._plan_pending_step()
+        if step is not None and self._complexity.requires_plan and tool_call.name not in _OBSERVATION_TOOLS and tool_call.name != step.tool_hint:
+            self._emit(EventType.task_failed, {"step_id": step.id, "tool": tool_call.name, "error": "tool fora do passo atual do plano"})
+            return (
+                self._tool_result_message(tool_call.name, success=False, response={}, error=f"A ferramenta '{tool_call.name}' não corresponde ao passo atual '{step.tool_hint}'. Execute primeiro o passo planejado." , tool_call_id=tool_call.id),
+                ExecutionEvidence(action_id=f"rejected-{step.id}", tool=tool_call.name, arguments=dict(tool_call.arguments or {}), executed_at="not-executed", success=False, result={}, error="tool fora do passo atual do plano", status="failed"),
+            )
         message, execution = await super()._execute_tool(tool_call, permissions, conversation_id, allowed_names)
         if execution is None or not execution.success:
             if execution is not None:
