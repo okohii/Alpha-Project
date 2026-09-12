@@ -12,6 +12,12 @@ from app.tools.base import Tool, ToolPermission, ToolResult
 
 
 def capture_screen(path: str) -> str:
+    """Capture the complete Windows virtual desktop, including every monitor.
+
+    Using VirtualScreen instead of PrimaryScreen is intentional: verification must
+    be able to find a target on any connected display, including monitors arranged
+    to the left/top of the primary display (negative virtual coordinates).
+    """
     if os.name != "nt":
         raise RuntimeError("Capturar tela só é suportado no Windows.")
     target = Path(path)
@@ -19,10 +25,10 @@ def capture_screen(path: str) -> str:
     escaped = str(target).replace("'", "''")
     script = (
         "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
-        "$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
+        "$b = [System.Windows.Forms.SystemInformation]::VirtualScreen; "
         "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; "
         "$g = [System.Drawing.Graphics]::FromImage($bmp); "
-        "$g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); "
+        "$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $b.Size); "
         f"$bmp.Save('{escaped}'); "
         "$g.Dispose(); $bmp.Dispose()"
     )
@@ -34,7 +40,7 @@ def capture_screen(path: str) -> str:
         check=False,
     )
     if result.returncode != 0 or not target.exists():
-        detail = (result.stderr or "falha ao capturar a tela").strip()
+        detail = (result.stderr or "falha ao capturar o desktop virtual").strip()
         raise RuntimeError(detail)
     return str(target)
 
@@ -42,9 +48,9 @@ def capture_screen(path: str) -> str:
 class ScreenshotTool(Tool):
     name = "screenshot"
     description = (
-        "Captura a tela inteira e salva um PNG dentro das pastas permitidas; "
-        "retorna o caminho do arquivo e, se o modelo de visão estiver configurado, "
-        "uma descrição visual da tela (apps e botões com coordenadas aproximadas)."
+        "Captura o desktop virtual inteiro (todos os monitores) e salva um PNG dentro "
+        "das pastas permitidas; retorna o caminho e, se a visão estiver configurada, "
+        "uma descrição visual dos apps e botões com coordenadas aproximadas."
     )
     permission = ToolPermission.write
 
@@ -69,7 +75,7 @@ class ScreenshotTool(Tool):
             saved = capture_screen(str(target))
         except (ValueError, OSError, RuntimeError) as exc:
             return ToolResult(name=self.name, success=False, data={}, error=str(exc))
-        data: dict[str, Any] = {"path": saved, "saved": True}
+        data: dict[str, Any] = {"path": saved, "saved": True, "scope": "virtual_desktop_all_monitors"}
         if self.vision is not None and self.vision.available():
             try:
                 data["screen"] = await self.vision.describe(saved)
@@ -83,30 +89,19 @@ class ScreenshotTool(Tool):
             data={
                 **data,
                 "hint": (
-                    "Confira a descrição 'screen' (com coordenadas) para clicar "
-                    "em botões com mouse_click."
+                    "A imagem cobre todos os monitores. Use as coordenadas no espaço "
+                    "virtual do Windows ao clicar com mouse_click."
                 ),
             },
         )
-
-    def parameters_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Opcional: caminho do PNG dentro das pastas permitidas",
-                },
-            },
-        }
 
 
 class VerifyScreenTool(Tool):
     name = "verify_screen"
     description = (
-        "Tira um screenshot, envia ao modelo de visão e responde se uma meta foi atingida. "
-        "Útil para confirmar que uma ação (clique, digitação, abertura de app) teve o efeito "
-        "esperado. Retorne JSON com achieved, feedback e attempts."
+        "Tira um screenshot do desktop virtual inteiro (todos os monitores), envia ao "
+        "modelo de visão e responde se uma meta foi atingida. Útil para confirmar que "
+        "uma ação teve o efeito esperado em qualquer monitor."
     )
     permission = ToolPermission.read
 
@@ -125,12 +120,7 @@ class VerifyScreenTool(Tool):
         goal = str(kwargs.get("goal", "") or "").strip()
         max_retries = int(kwargs.get("max_retries", 0) or 0)
         if not goal:
-            return ToolResult(
-                name=self.name,
-                success=False,
-                data={},
-                error="Informe a meta a verificar.",
-            )
+            return ToolResult(name=self.name, success=False, data={}, error="Informe a meta a verificar.")
         base = (
             self.file_manager.allowed_directories[0]
             if self.file_manager.allowed_directories
@@ -149,6 +139,7 @@ class VerifyScreenTool(Tool):
             success=True,
             data={
                 "path": saved,
+                "scope": "virtual_desktop_all_monitors",
                 "achieved": result["achieved"],
                 "attempts": result["attempts"],
                 "feedback": result["last"]["feedback"],
@@ -160,20 +151,8 @@ class VerifyScreenTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "goal": {
-                    "type": "string",
-                    "description": (
-                        "O que você espera ver na tela após a ação "
-                        "(ex.: 'github aberto no navegador')."
-                    ),
-                },
-                "max_retries": {
-                    "type": "integer",
-                    "description": (
-                        "Quantas novas capturas pode tirar caso não confirme "
-                        "de primeira (padrão 0)."
-                    ),
-                },
+                "goal": {"type": "string", "description": "O que você espera ver após a ação."},
+                "max_retries": {"type": "integer", "description": "Número de novas verificações visuais."},
             },
             "required": ["goal"],
         }
