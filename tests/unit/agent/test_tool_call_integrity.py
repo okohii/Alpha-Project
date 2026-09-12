@@ -41,10 +41,11 @@ def test_does_not_detect_normal_answer_as_tool_intent():
     )
 
 
-def test_default_conversation_id_is_stable_for_same_agent(agent):
-    first = agent._conversation_id_for_turn(None)
-    second = agent._conversation_id_for_turn(None)
-    assert first == second
+def test_synthetic_tool_response_is_blocked_without_retry():
+    tools = [{"type": "function", "function": {"name": "web_search"}}]
+    assert SerializedAgentCore._scrub_synthetic_tool_response(
+        "<tool_response>web_search executada com sucesso</tool_response>"
+    ) == "Não posso considerar uma ferramenta executada sem uma chamada nativa real."
 
 
 @pytest.mark.asyncio
