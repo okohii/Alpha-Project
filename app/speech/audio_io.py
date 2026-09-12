@@ -144,11 +144,11 @@ def record_microphone_vad(
     device: str | int | None = None,
     sample_rate: int = SAMPLE_RATE,
     pre_roll_duration: float = 0.35,
-    silence_pad: float = 0.80,
-    min_speech_duration: float = 0.40,
+    silence_pad: float = 1.25,
+    min_speech_duration: float = 0.35,
     max_wait: float = 60.0,
-    abs_threshold: float = 300.0,
-    noise_floor_multiplier: float = 2.5,
+    abs_threshold: float = 250.0,
+    noise_floor_multiplier: float = 2.2,
     frame_duration: float = 0.05,
     speech_confirm_frames: int = 2,
     throat_clear_margin: float = 0.05,
@@ -156,7 +156,12 @@ def record_microphone_vad(
     on_speech_start: Callable[[], None] | None = None,
     abort_event: threading.Event | None = None,
 ) -> Path | None:
-    """Grava fala com VAD tolerante a pausas naturais e início imediato da fala."""
+    """Grava fala com VAD tolerante a pausas naturais e protege a cauda da frase.
+
+    O detector usa histerese: depois que a fala começa, o limiar fica mais baixo
+    do que o limiar de disparo. Isso evita que palavras finais ditas mais baixo
+    sejam classificadas como silêncio e cortadas antes do Whisper.
+    """
     try:
         import sounddevice
     except Exception as exc:  # pragma: no cover
@@ -194,6 +199,7 @@ def record_microphone_vad(
     speech_started = False
     speech_started_at: float | None = None
     threshold = abs_threshold
+    trailing_threshold = abs_threshold * 0.72
     pre_roll_at_start: list[np.ndarray] = []
 
     stream = sounddevice.InputStream(
@@ -233,17 +239,18 @@ def record_microphone_vad(
                 is_voice = _vad_webrtc(sample, sample_rate, webrtc_vad)
             else:
                 if len(noise_samples) < 4:
-                    # Never use an obvious speech-level frame to calibrate the noise floor.
                     if rms < abs_threshold:
                         noise_samples.append(rms)
                     if len(noise_samples) < 4:
-                        # Keep listening while preserving this frame in the rolling pre-roll.
                         continue
                 if len(noise_samples) == 4:
                     noise_floor = float(np.percentile(np.asarray(noise_samples), 10))
                     threshold = _vad_threshold(noise_floor, abs_threshold, noise_floor_multiplier)
-                    noise_samples.append(noise_floor)  # mark calibration as complete
-                is_voice = rms >= threshold
+                    # Once speech begins, tolerate a quieter final word while
+                    # still staying above the measured noise floor.
+                    trailing_threshold = max(abs_threshold * 0.60, noise_floor * 1.55)
+                    noise_samples.append(noise_floor)
+                is_voice = rms >= (trailing_threshold if speech_started else threshold)
 
             if not speech_started:
                 confirming_frames = confirming_frames + 1 if is_voice else 0
@@ -273,14 +280,13 @@ def record_microphone_vad(
         print(f"[audio] capture_discarded duration={logger_duration:.2f}s speech_started={speech_started}", flush=True)
         return None
 
-    # The rolling pre-roll already contains frames that may also be in speech_chunks.
-    # Deduplicate by using the snapshot from the exact speech-start boundary only.
     all_chunks = pre_roll_at_start + speech_chunks
     frames = b"".join(chunk.astype(np.int16).tobytes() for chunk in all_chunks)
     duration = len(frames) / (2 * sample_rate)
     print(
         f"[audio] captured={duration:.2f}s speech_frames={len(speech_chunks)} "
-        f"threshold={threshold:.1f}",
+        f"threshold={threshold:.1f} trailing_threshold={trailing_threshold:.1f} "
+        f"silence_pad={silence_pad:.2f}s",
         flush=True,
     )
     return _save_wav(frames, sample_rate)
