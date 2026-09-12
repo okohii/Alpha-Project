@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+import asyncio
 
 import pytest
 
@@ -21,7 +21,8 @@ class FakeProvider:
 @pytest.fixture
 def agent():
     obj = object.__new__(SerializedAgentCore)
-    obj._turn_lock = __import__("asyncio").Lock()
+    obj._turn_lock = asyncio.Lock()
+    obj.event_bus = None
     obj._emit = lambda *args, **kwargs: None
     return obj
 
@@ -38,6 +39,12 @@ def test_does_not_detect_normal_answer_as_tool_intent():
     assert not SerializedAgentCore._looks_like_tool_intent(
         "Hoje está tudo bem por aqui.", tools
     )
+
+
+def test_default_conversation_id_is_stable_for_same_agent(agent):
+    first = agent._conversation_id_for_turn(None)
+    second = agent._conversation_id_for_turn(None)
+    assert first == second
 
 
 @pytest.mark.asyncio
