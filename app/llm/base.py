@@ -21,6 +21,7 @@ class LLMMessage:
     role: str
     content: str
     tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -39,8 +40,6 @@ class ExecutionEvidence:
     result: dict[str, Any]
     error: str | None = None
     verified: bool = False
-    # Ciclo de vida observado da execução. Valores: "requested", "executing",
-    # "executed", "failed", "observed", "verified", "parse_failed".
     status: str | None = None
 
     def __post_init__(self) -> None:
@@ -59,12 +58,7 @@ class LLMResponse:
 
 
 class StreamedResponse:
-    """Resposta de LLM em streaming.
-
-    Itere para receber os tokens de conteúdo (``async for token in resp``);
-    após a iteração, ``content`` agrega o texto completo e ``tool_calls``
-    traz as tool calls detectadas no turno, quando houver.
-    """
+    """Resposta de LLM em streaming."""
 
     def __init__(self) -> None:
         self.generator: Any | None = None
