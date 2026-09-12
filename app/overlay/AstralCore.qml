@@ -1,5 +1,65 @@
 import QtQuick
 import QtQuick3D
+import QtQuick3D.Helpers
+
+// Qt Quick 3D only provides #Sphere/#Cube/#Cylinder/#Cone/#Rectangle as
+// built-in Model sources. Torus is a helper geometry, so keep it procedural
+// instead of using the invalid source "#Torus".
+component AstralTorus : ProceduralMesh {
+    property real radius: 100.0
+    property real tubeRadius: 8.0
+    property int rings: 48
+    property int segments: 20
+
+    property var meshArrays: generateTorus(rings, segments, radius, tubeRadius)
+
+    positions: meshArrays.verts
+    normals: meshArrays.normals
+    uv0s: meshArrays.uvs
+    indexes: meshArrays.indices
+
+    function generateTorus(ringCount: int, segmentCount: int, ringRadius: real, tube: real): var {
+        let verts = []
+        let normals = []
+        let uvs = []
+        let indices = []
+
+        for (let i = 0; i <= ringCount; ++i) {
+            const u = i / ringCount * Math.PI * 2
+            const cu = Math.cos(u)
+            const su = Math.sin(u)
+
+            for (let j = 0; j <= segmentCount; ++j) {
+                const v = j / segmentCount * Math.PI * 2
+                const cv = Math.cos(v)
+                const sv = Math.sin(v)
+
+                const centerX = ringRadius * cu
+                const centerZ = ringRadius * su
+                const px = centerX + tube * cv * cu
+                const py = tube * sv
+                const pz = centerZ + tube * cv * su
+
+                verts.push(Qt.vector3d(px, py, pz))
+                normals.push(Qt.vector3d(cv * cu, sv, cv * su))
+                uvs.push(Qt.vector2d(i / ringCount, j / segmentCount))
+            }
+        }
+
+        for (let i = 0; i < ringCount; ++i) {
+            for (let j = 0; j < segmentCount; ++j) {
+                const a = (segmentCount + 1) * i + j
+                const b = (segmentCount + 1) * (i + 1) + j
+                const c = (segmentCount + 1) * (i + 1) + j + 1
+                const d = (segmentCount + 1) * i + j + 1
+                indices.push(a, d, b)
+                indices.push(b, d, c)
+            }
+        }
+
+        return { verts: verts, normals: normals, uvs: uvs, indices: indices }
+    }
+}
 
 Item {
     id: root
@@ -90,7 +150,7 @@ Item {
             eulerRotation.x: 65
             eulerRotation.y: root.motion * 34
             Model {
-                source: "#Torus"
+                geometry: AstralTorus { radius: 105; tubeRadius: 7; rings: 48; segments: 20 }
                 scale: Qt.vector3d(1.35, 1.35, 1.35)
                 materials: PrincipledMaterial {
                     baseColor: "#72e8ff"
@@ -107,7 +167,7 @@ Item {
             eulerRotation.z: 30
             eulerRotation.y: -root.motion * 25
             Model {
-                source: "#Torus"
+                geometry: AstralTorus { radius: 105; tubeRadius: 6; rings: 48; segments: 20 }
                 scale: Qt.vector3d(1.62, 1.62, 1.62)
                 materials: PrincipledMaterial {
                     baseColor: "#9b83ff"
@@ -123,7 +183,7 @@ Item {
             eulerRotation.y: 90
             eulerRotation.z: root.motion * 18
             Model {
-                source: "#Torus"
+                geometry: AstralTorus { radius: 105; tubeRadius: 5; rings: 48; segments: 20 }
                 scale: Qt.vector3d(1.95, 1.95, 1.95)
                 materials: PrincipledMaterial {
                     baseColor: "#55cfff"
