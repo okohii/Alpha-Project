@@ -13,7 +13,7 @@ from app.avatar.controller import AvatarController
 from app.avatar.mapping import AnimationMapping
 from app.avatar.renderer import AvatarCommand
 from app.core.config import get_settings
-from app.core.events import EventBus, EventType
+from app.core.events import EventBus, EventType, SystemEvent
 from app.db.session import AsyncSessionLocal
 from app.runtime import build_agent
 from app.security import SENSITIVE_PREFIX
@@ -29,6 +29,22 @@ UI_DIR = Path(__file__).parent / "ui"
 
 _CONFIRM_TIMEOUT = 180.0
 _EXIT_WORDS = {"sair", "encerrar", "parar", "fechar"}
+_EXECUTION_EVENTS = {
+    EventType.tool_selected,
+    EventType.tool_started,
+    EventType.tool_finished,
+    EventType.tool_failed,
+    EventType.skill_started,
+    EventType.skill_finished,
+    EventType.verification_started,
+    EventType.verification_completed,
+    EventType.task_created,
+    EventType.task_step_completed,
+    EventType.task_completed,
+    EventType.task_failed,
+    EventType.honesty_gate,
+    EventType.textual_tool_call_blocked,
+}
 
 
 class AvatarWSRenderer:
@@ -68,13 +84,43 @@ def _is_exit(text: str) -> bool:
     return cleaned in _EXIT_WORDS
 
 
+def _execution_payload(event: SystemEvent) -> dict[str, Any]:
+    payload = dict(event.payload or {})
+    tool = payload.get("tool") or payload.get("skill") or payload.get("task_id")
+    label = {
+        EventType.tool_selected: "ferramenta selecionada",
+        EventType.tool_started: "ferramenta executando",
+        EventType.tool_finished: "ferramenta concluída",
+        EventType.tool_failed: "ferramenta falhou",
+        EventType.skill_started: "skill iniciada",
+        EventType.skill_finished: "skill concluída",
+        EventType.verification_started: "verificação iniciada",
+        EventType.verification_completed: "verificação concluída",
+        EventType.task_created: "tarefa criada",
+        EventType.task_step_completed: "passo concluído",
+        EventType.task_completed: "tarefa concluída",
+        EventType.task_failed: "tarefa falhou",
+        EventType.honesty_gate: "honesty gate",
+        EventType.textual_tool_call_blocked: "tool call textual bloqueada",
+    }.get(event.type, event.type.value)
+    return {
+        "type": "execution",
+        "event": event.type.value,
+        "label": label,
+        "target": str(tool or ""),
+        "success": payload.get("success"),
+        "duration_ms": event.duration_ms,
+        "detail": payload.get("error") or payload.get("message") or payload.get("preview") or "",
+    }
+
+
 class AvatarSession:
     """Sessão de voz contínua do avatar.
 
     O mic fica ligado por padrão. O loop é idêntico ao da CLI de voz:
-    ouve → transcreve → agente responde → fala (interrompível). Apenas
-    os canais de saída mudam: estados do avatar via AvatarWSRenderer e
-    legendas via WebSocket, em vez de prints no terminal.
+    ouve → transcreve → agente responde → fala (interrompível). A interface
+    também recebe eventos de execução para mostrar ferramentas, ações e
+    verificações sem transformar o avatar em um agente separado.
     """
 
     def __init__(self, websocket: WebSocket) -> None:
@@ -86,6 +132,7 @@ class AvatarSession:
             mapping=AnimationMapping(),
         )
         self.avatar.subscribe(self.event_bus)
+        self.event_bus.subscribe_all(self._forward_agent_event)
         self._confirm_queue: asyncio.Queue[bool] = asyncio.Queue()
         self.cancel_event = asyncio.Event()
         self._voice_task: asyncio.Task[Any] | None = None
@@ -94,6 +141,13 @@ class AvatarSession:
     @property
     def state(self) -> str:
         return self.avatar.state.value
+
+    def _forward_agent_event(self, event: SystemEvent) -> None:
+        if event.type in _EXECUTION_EVENTS:
+            try:
+                self._out.put_nowait(_execution_payload(event))
+            except Exception:  # noqa: BLE001
+                pass
 
     async def push(self, payload: dict[str, Any]) -> None:
         try:
