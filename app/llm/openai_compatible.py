@@ -27,25 +27,18 @@ class OpenAICompatibleProvider:
     ALPHA, which keeps the agent independent from any individual cloud vendor.
     """
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str | None = None,
-        base_url: str | None = None,
-    ) -> None:
+    def __init__(self, api_key: str | None = None, model: str | None = None, base_url: str | None = None) -> None:
         settings = get_settings()
         self.api_key = api_key if api_key is not None else settings.cloud_llm_api_key
         self.model = model or settings.cloud_llm_model
         self.base_url = (base_url or settings.cloud_llm_base_url).rstrip("/")
-        self.timeout = settings.llm_timeout_seconds
+        self.timeout = settings.cloud_llm_timeout_seconds
 
     @staticmethod
     def _message_payload(message: LLMMessage) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "role": message.role,
-            "content": message.content,
-        }
-
+        payload: dict[str, Any] = {"role": message.role, "content": message.content}
+        if message.tool_call_id:
+            payload["tool_call_id"] = message.tool_call_id
         if message.tool_calls:
             payload["tool_calls"] = [
                 {
@@ -58,17 +51,13 @@ class OpenAICompatibleProvider:
                 }
                 for call in message.tool_calls
             ]
-
         return payload
 
     @staticmethod
     def _tools_payload(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         for tool in tools:
-            if "function" in tool:
-                function = dict(tool["function"])
-            else:
-                function = dict(tool)
+            function = dict(tool["function"]) if "function" in tool else dict(tool)
             normalized.append({"type": "function", "function": function})
         return normalized
 
@@ -95,7 +84,6 @@ class OpenAICompatibleProvider:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-
         url = f"{self.base_url}/chat/completions"
         logger.debug("Enviando requisição OpenAI-compatible: model=%s url=%s", self.model, url)
 
@@ -108,12 +96,10 @@ class OpenAICompatibleProvider:
         choices = data.get("choices") or []
         if not choices:
             return LLMResponse(content="", raw=data)
-
         message = choices[0].get("message") or {}
         content = message.get("content") or ""
         raw_tool_calls = message.get("tool_calls") or []
         tool_calls: list[ToolCall] = []
-
         for raw_call in raw_tool_calls:
             function = raw_call.get("function") or {}
             name = function.get("name")
@@ -134,12 +120,7 @@ class OpenAICompatibleProvider:
                     id=raw_call.get("id") or ToolCall(name=name, arguments={}).id,
                 )
             )
-
-        return LLMResponse(
-            content=content,
-            tool_calls=tool_calls or None,
-            raw=data,
-        )
+        return LLMResponse(content=content, tool_calls=tool_calls or None, raw=data)
 
 
 __all__ = ["OpenAICompatibleAPIError", "OpenAICompatibleProvider"]
