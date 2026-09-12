@@ -18,7 +18,7 @@ from app.core.config import get_settings
 from app.core.events import EventBus, EventType, SystemEvent
 from app.db.session import AsyncSessionLocal
 from app.interaction import InteractionManager
-from app.perception.wakeword import normalize
+from app.perception.wakeword import find_wake_word, normalize
 from app.runtime import build_agent
 from app.security import SENSITIVE_PREFIX
 from app.speech import audio_io
@@ -218,6 +218,7 @@ class AvatarSession:
             agent = await build_agent(session, permission_prompt=self.permission_request, event_bus=self.event_bus, cancel_event=self.cancel_event)
             pipeline = VoicePipeline(event_bus=self.event_bus)
             self._pipeline = pipeline
+            await pipeline.warmup(wake_word=settings.wake_word_enabled, tts=settings.tts_enabled)
             carry: str | None = None
             while not self.cancel_event.is_set():
                 if self._interaction and self._interaction.expired():
@@ -234,7 +235,24 @@ class AvatarSession:
                         return
                     if path is None:
                         continue
-                    result = await pipeline.process(path)
+                    if settings.wake_word_enabled:
+                        wake_result = await pipeline.process_wake(path)
+                        wake_text = (wake_result.get("transcription") or "").strip()
+                        wake_confidence = float(wake_result.get("confidence") or 0.0)
+                        wake_suspicious = bool(wake_result.get("is_suspicious"))
+                        if (
+                            wake_suspicious
+                            or not wake_text
+                            or find_wake_word(wake_text, settings.wake_words) is None
+                            or wake_confidence < 0.30
+                        ):
+                            logger.debug("[avatar] wake rejected text=%r confidence=%.3f suspicious=%s", wake_text, wake_confidence, wake_suspicious)
+                            continue
+                        # Só aqui pagamos o custo do modelo completo, preservando
+                        # a melhor transcrição do comando depois da ativação.
+                        result = await pipeline.process(path)
+                    else:
+                        result = await pipeline.process(path)
                     text = (result.get("transcription") or "").strip()
                     confidence = float(result.get("confidence") or 0.0)
                     suspicious = bool(result.get("is_suspicious"))
@@ -296,7 +314,6 @@ class AvatarSession:
         energy_task = asyncio.create_task(self._emit_speech_energy(audio_path))
         self._interrupt_abort.clear()
         playback_interrupted = threading.Event()
-        interruption_capture_done = asyncio.Event()
 
         def on_speech_start() -> None:
             if playback_interrupted.is_set():
@@ -316,12 +333,9 @@ class AvatarSession:
                 interrupted_text = self._interruption_task.result()
                 if interrupted_text:
                     return interrupted_text
-                # If capture ended without usable text, let normal playback timing finish.
                 if not playback_wait.done():
                     await playback_wait
             else:
-                # TTS finished. Keep the interruption listener alive briefly so speech
-                # immediately after the final syllable can still be captured.
                 try:
                     interrupted_text = await asyncio.wait_for(self._interruption_task, timeout=0.45)
                 except asyncio.TimeoutError:
