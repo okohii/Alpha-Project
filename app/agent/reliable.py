@@ -81,17 +81,43 @@ class ReliableAgentCore(SerializedAgentCore):
                 pass
         return await super()._run_agent_loop(provider, messages, permissions, conversation_id, stream_tokens, task, context, expose_tools)
 
+    def _plan_pending_step(self) -> Any | None:
+        plan = getattr(self, "_plan", None)
+        if plan is None:
+            return None
+        for step in plan.steps:
+            if getattr(step, "status", "pending") not in {"completed", "cancelled"}:
+                return step
+        return None
+
     def _initial_tool_names(self, task: str, permissions: set[Any]) -> set[str]:
         names = super()._initial_tool_names(task, permissions)
-        plan = getattr(self, "_plan", None)
-        if plan is None or not getattr(plan, "steps", None):
+        step = self._plan_pending_step()
+        if step is None:
             return names
-        planned = {step.tool_hint for step in plan.steps if getattr(step, "status", "pending") not in {"completed", "cancelled"}}
-        if planned:
-            narrowed = names & planned
-            if narrowed:
-                return narrowed | ({"time", "system_info", "memory_search"} & names)
-        return names
+        planned = {step.tool_hint}
+        if self.skill_registry is not None:
+            skill_name = self.skill_registry.skill_for_tool(step.tool_hint)
+            if skill_name:
+                planned.update(self.skill_registry.get_tools_for_skills([skill_name]))
+        planned &= names | {"verify_screen"}
+        observability = {"time", "system_info", "memory_search", "screenshot", "verify_screen"}
+        narrowed = (names & observability) | planned
+        return narrowed or names
+
+    def _expand_tools(self, allowed: set[str], called: list[str]) -> set[str]:
+        expanded = set(allowed)
+        step = self._plan_pending_step()
+        if step is None:
+            return expanded
+        # Só o passo atual e as ferramentas da mesma skill podem avançar o plano.
+        if self.skill_registry is not None:
+            skill_name = self.skill_registry.skill_for_tool(step.tool_hint)
+            if skill_name:
+                expanded.update(self.skill_registry.get_tools_for_skills([skill_name]))
+        expanded.add(step.tool_hint)
+        expanded.update({"screenshot", "verify_screen", "time", "system_info", "memory_search"} & set(self.tool_registry.tools))
+        return expanded
 
     async def _provider_turn(self, provider: LLMProvider, messages: list[LLMMessage], tools: list[dict[str, Any]], stream_tokens: bool) -> LLMResponse:
         if self._complexity.level is Complexity.SIMPLE:
