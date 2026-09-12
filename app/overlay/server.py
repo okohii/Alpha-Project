@@ -29,6 +29,22 @@ logger = logging.getLogger(__name__)
 UI_DIR = Path(__file__).parent / "ui"
 
 _CONFIRM_TIMEOUT = 180.0
+_EXECUTION_EVENTS = {
+    EventType.tool_selected,
+    EventType.tool_started,
+    EventType.tool_finished,
+    EventType.tool_failed,
+    EventType.skill_started,
+    EventType.skill_finished,
+    EventType.verification_started,
+    EventType.verification_completed,
+    EventType.task_created,
+    EventType.task_step_completed,
+    EventType.task_completed,
+    EventType.task_failed,
+    EventType.honesty_gate,
+    EventType.textual_tool_call_blocked,
+}
 
 
 def _serialize_event(event: SystemEvent) -> dict[str, Any]:
@@ -36,6 +52,36 @@ def _serialize_event(event: SystemEvent) -> dict[str, Any]:
         "event": event.type.value,
         "payload": dict(event.payload or {}),
         "duration_ms": event.duration_ms,
+    }
+
+
+def _execution_payload(event: SystemEvent) -> dict[str, Any]:
+    payload = dict(event.payload or {})
+    target = payload.get("tool") or payload.get("skill") or payload.get("task_id") or ""
+    labels = {
+        EventType.tool_selected: "ferramenta selecionada",
+        EventType.tool_started: "ferramenta executando",
+        EventType.tool_finished: "ferramenta concluída",
+        EventType.tool_failed: "ferramenta falhou",
+        EventType.skill_started: "skill iniciada",
+        EventType.skill_finished: "skill concluída",
+        EventType.verification_started: "verificação iniciada",
+        EventType.verification_completed: "verificação concluída",
+        EventType.task_created: "tarefa criada",
+        EventType.task_step_completed: "passo concluído",
+        EventType.task_completed: "tarefa concluída",
+        EventType.task_failed: "tarefa falhou",
+        EventType.honesty_gate: "honesty gate",
+        EventType.textual_tool_call_blocked: "tool call textual bloqueada",
+    }
+    return {
+        "type": "execution",
+        "event": event.type.value,
+        "label": labels.get(event.type, event.type.value),
+        "target": str(target),
+        "success": payload.get("success"),
+        "duration_ms": event.duration_ms,
+        "detail": payload.get("error") or payload.get("message") or payload.get("preview") or "",
     }
 
 
@@ -96,8 +142,8 @@ class _OverlaySession:
                 self.state = new_state
                 await self.send({"type": "state", "state": new_state.value})
 
-            # user_message não carrega texto (só conversation_id) e a UI já
-            # renderiza a fala localmente ao enviar — não repassamos.
+            if event.type in _EXECUTION_EVENTS:
+                await self.send(_execution_payload(event))
             if event.type in TOOL_EVENTS or (
                 event.type in TEXT_EVENTS and event.type is not EventType.user_message
             ):
@@ -110,7 +156,6 @@ class _OverlaySession:
                 )
 
     async def permission_request(self, candidate: str) -> bool:
-        """Handler de confirmação — NUNCA autoriza sozinho; só o usuário decide."""
         display = _parse_confirmation_candidate(candidate)
         await self.send(
             {
@@ -121,9 +166,7 @@ class _OverlaySession:
             }
         )
         try:
-            return await asyncio.wait_for(
-                self._confirm_queue.get(), timeout=_CONFIRM_TIMEOUT
-            )
+            return await asyncio.wait_for(self._confirm_queue.get(), timeout=_CONFIRM_TIMEOUT)
         except asyncio.TimeoutError:
             return False
 
@@ -142,9 +185,7 @@ async def _handle_chat(
     )
     if stream:
         result = None
-        async for _ in agent.chat_stream(
-            message, conversation_id=overlay.conversation_id
-        ):
+        async for _ in agent.chat_stream(message, conversation_id=overlay.conversation_id):
             pass
     else:
         result = await agent.chat(message, conversation_id=overlay.conversation_id)
@@ -156,9 +197,7 @@ async def _handle_voice(overlay: _OverlaySession, raw: dict[str, Any]) -> None:
     """Recebe áudio base64 e transcreve usando o EventBus da sessão."""
     audio_b64 = raw.get("audio_base64", "")
     if not audio_b64:
-        await overlay.send(
-            {"type": "error", "message": "nenhum áudio recebido para transcrição"}
-        )
+        await overlay.send({"type": "error", "message": "nenhum áudio recebido para transcrição"})
         return
     try:
         audio_bytes = base64.b64decode(audio_b64)
@@ -207,9 +246,7 @@ async def overlay_ws(websocket: WebSocket) -> None:
                         except Exception:
                             pass
                     overlay.chat_task = asyncio.create_task(
-                        _handle_chat(
-                            session, overlay, message, action == "chat_stream"
-                        )
+                        _handle_chat(session, overlay, message, action == "chat_stream")
                     )
                 elif action == "cancel":
                     overlay.cancel_event.set()
