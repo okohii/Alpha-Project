@@ -30,24 +30,6 @@ def test_screenshot_alone_is_not_goal_verification():
     assert verifier.verify(evidence) is VerificationResult.UNCERTAIN
 
 
-def test_strict_gui_success_without_postcondition_is_not_verified():
-    core = _core()
-    execution = ExecutionEvidence(
-        action_id="a1",
-        tool="mouse_click",
-        arguments={"x": 100, "y": 100},
-        executed_at="now",
-        success=True,
-        result={"clicked": True},
-    )
-    result = core._apply_honesty_gate(
-        "Cliquei no botão com sucesso.",
-        [execution],
-    )
-    assert execution.verified is False
-    assert "não consegui verificar" not in result.lower() or "pós-condição" in result.lower()
-
-
 def test_strict_gui_claim_is_rejected_without_postcondition():
     core = _core()
     execution = ExecutionEvidence(
@@ -85,3 +67,31 @@ def test_verified_postcondition_allows_success_claim():
         [execution],
     )
     assert result == "Enviei a mensagem com sucesso."
+
+
+def test_visual_verification_promotes_prior_strict_action():
+    action = ExecutionEvidence(
+        action_id="a1",
+        tool="mouse_click",
+        arguments={"x": 100, "y": 100},
+        executed_at="now",
+        success=True,
+        result={"clicked": True},
+        verified=False,
+        status="executed_unverified",
+    )
+    visual = ExecutionEvidence(
+        action_id="a2",
+        tool="verify_screen",
+        arguments={"goal": "o botão Enviar está ativo"},
+        executed_at="now",
+        success=True,
+        result={"achieved": True},
+        verified=True,
+        status="verified",
+    )
+
+    SerializedAgentCore._correlate_visual_verification([action, visual])
+
+    assert action.verified is True
+    assert action.status == "verified"
