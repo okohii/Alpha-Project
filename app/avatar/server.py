@@ -130,16 +130,7 @@ class AvatarSession:
 
     async def _listen_for_interruption(self, pipeline: VoicePipeline, max_wait: float, on_speech_start: Any) -> str | None:
         try:
-            path = await asyncio.to_thread(
-                audio_io.record_microphone_vad,
-                max_wait=max(0.5, max_wait),
-                pre_roll_duration=0.25,
-                silence_pad=0.30,
-                min_speech_duration=0.25,
-                speech_confirm_frames=2,
-                on_speech_start=on_speech_start,
-                abort_event=self._interrupt_abort,
-            )
+            path = await asyncio.to_thread(audio_io.record_microphone_vad, max_wait=max(0.5, max_wait), pre_roll_duration=0.25, silence_pad=0.30, min_speech_duration=0.25, speech_confirm_frames=2, on_speech_start=on_speech_start, abort_event=self._interrupt_abort)
         except audio_io.MicrophoneRecordingError:
             return None
         if path is None or self.cancel_event.is_set() or self._interrupt_abort.is_set():
@@ -193,6 +184,8 @@ class AvatarSession:
 
     async def _start_voice(self) -> None:
         if self._voice_task is None or self._voice_task.done():
+            self._audio_abort.clear()
+            self._interrupt_abort.clear()
             self._voice_task = asyncio.create_task(self._run_voice())
 
     async def _set_interaction(self, active: bool, reason: str = "") -> None:
@@ -205,8 +198,8 @@ class AvatarSession:
 
     async def _run_voice(self) -> None:
         settings = get_settings()
-        if not (settings.stt_enabled and settings.tts_enabled):
-            await self.push({"type": "error", "message": "voz desativada: habilite stt_enabled e tts_enabled"})
+        if not settings.stt_enabled:
+            await self.push({"type": "error", "message": "voz desativada: habilite stt_enabled"})
             return
         self._interaction = InteractionManager(enabled=settings.wake_word_enabled, wake_words=settings.wake_words, timeout_seconds=settings.interaction_timeout_seconds, end_words=settings.interaction_end_words)
         await self.push({"type": "ready", "state": self.state, "voice": "on", "wake_word_enabled": settings.wake_word_enabled})
@@ -233,6 +226,7 @@ class AvatarSession:
                 carry = None
                 if text is None:
                     self.event_bus.emit(EventType.assistant_listening)
+                    active_before_capture = bool(self._interaction and self._interaction.active)
                     try:
                         path = await asyncio.to_thread(audio_io.record_microphone_vad, max_wait=60.0, abort_event=self._audio_abort)
                     except audio_io.MicrophoneRecordingError as exc:
@@ -240,7 +234,12 @@ class AvatarSession:
                         return
                     if path is None:
                         continue
-                    if settings.wake_word_enabled:
+
+                    # O wake detector só tem autoridade quando a sessão está
+                    # realmente dormente. Depois que ALPHA foi ativado, NÃO
+                    # usamos o tiny novamente: a frase inteira vai para o
+                    # small CUDA para obter a maior acurácia possível.
+                    if settings.wake_word_enabled and not active_before_capture:
                         try:
                             wake_result = await pipeline.process_wake(path)
                         except Exception as exc:
@@ -254,27 +253,20 @@ class AvatarSession:
                         if wake_suspicious or not wake_text or wake_word is None or wake_confidence < 0.30:
                             logger.debug("[avatar] wake rejected text=%r confidence=%.3f suspicious=%s", wake_text, wake_confidence, wake_suspicious)
                             continue
-
-                        # O wake word já foi comprovado. Mostrar o avatar imediatamente,
-                        # antes de qualquer inferência mais pesada.
                         await self._set_interaction(True, "wake_word")
                         _, wake_command = strip_wake_word(wake_text, settings.wake_words)
                         wake_command = (wake_command or "").strip(" .,!?;:\n\t")
                         logger.info("[avatar] wake accepted word=%r confidence=%.3f command_hint=%r", wake_word, wake_confidence, wake_command)
-
-                        # Se o usuário só chamou o ALPHA ("Alpha" / "Alfa"),
-                        # NÃO rode o small CUDA no mesmo áudio. Apenas ative a
-                        # interação e volte imediatamente a escutar o próximo turno.
+                        # Se o usuário falou apenas o wake word, aguarde o
+                        # próximo turno, que será transcrito pelo small.
                         if not wake_command:
                             continue
-
-                        # Há indício de comando no mesmo áudio; agora sim pagamos
-                        # o custo da transcrição completa no modelo small.
+                        # Mesmo quando existe command_hint, a maior acurácia
+                        # vem da transcrição full do small, não do tiny.
                         try:
                             result = await pipeline.process(path)
                         except Exception as exc:
                             logger.exception("[avatar] full transcription failed; using wake command hint")
-                            await self.push({"type": "caption", "from": "user", "text": wake_command})
                             text = wake_command
                         else:
                             text = (result.get("transcription") or "").strip()
@@ -283,13 +275,15 @@ class AvatarSession:
                             normalized = normalize(text).strip(" .,!?;:")
                             if suspicious or not normalized or len(normalized) < 2:
                                 logger.warning("[avatar] transcription rejected text=%r confidence=%.3f suspicious=%s", text, confidence, suspicious)
-                                # O detector de wake já forneceu um comando plausível;
-                                # usar esse hint é melhor que perder o turno inteiro.
                                 text = wake_command
                     else:
+                        # Sessão ativa: uma única transcrição completa é a fonte
+                        # de verdade para o comando do usuário.
                         try:
+                            logger.debug("[avatar] active interaction -> full STT")
                             result = await pipeline.process(path)
                         except Exception as exc:
+                            logger.exception("[avatar] full transcription failed")
                             await self.push({"type": "error", "message": f"falha na transcrição: {exc}"})
                             continue
                         text = (result.get("transcription") or "").strip()
@@ -299,6 +293,7 @@ class AvatarSession:
                         if suspicious or not normalized or len(normalized) < 2:
                             logger.warning("[avatar] transcription rejected text=%r confidence=%.3f suspicious=%s", text, confidence, suspicious)
                             continue
+
                 if not text:
                     continue
                 decision = self._interaction.decide(text) if self._interaction else None
@@ -355,7 +350,6 @@ class AvatarSession:
         except audio_io.AudioPlaybackError as exc:
             await self.push({"type": "error", "message": f"áudio indisponível: {exc}"})
             return None
-
         duration = n_frames / frame_rate if frame_rate else 0.0
         await self.push({"type": "avatar_show", "animation": "speak", "duration_ms": max(320, int(duration * 1000))})
         await self.push({"type": "state", "state": "speaking", "animation": "speak", "expression": None, "emotion": emotion.to_dict() if emotion else None, "idle_after_ms": max(320, int(duration * 1000))})
