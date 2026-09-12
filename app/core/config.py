@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.15; llm_num_ctx: int = 4096; llm_num_predict: int = 160; llm_num_predict_tool: int = 80; llm_keep_alive: str = "10m"
     stt_enabled: bool = True; stt_model_size: str = "small"; stt_wake_model_size: str = "tiny"; stt_language: str = "pt"; stt_device: str = "auto"; stt_wake_device: str = "cpu"; stt_compute_type: str = "auto"; stt_initial_prompt: str = ""; stt_beam_size: int = 1; stt_best_of: int = 1; stt_temperature: float = 0.0
     stt_vad_filter: bool = False; stt_vad_min_silence_ms: int = 300
-    wake_word_enabled: bool = False; wake_words: str = "alpha,alfa"; interaction_timeout_seconds: float = 25.0; interaction_end_words: str = "sair,encerrar,parar,fechar,descansar,até mais"
+    wake_word_enabled: bool = False; wake_words: str = "Alpha, alpha, Alfa, alfa"; interaction_timeout_seconds: float = 25.0; interaction_end_words: str = "sair,encerrar,parar,fechar,descansar,até mais"
     tts_enabled: bool = True; tts_voice: str = ""; tts_speed: float = 1.0; tts_device: str = "auto"; tts_streaming: bool = True; tts_emotion_enabled: bool = True; tts_default_emotion: str = "neutral"; tts_emotion_max_intensity: float = 1.0; tts_emotion_decay_seconds: float = 60.0
     memory_min_importance: float = 0.70; memory_working_max_items: int = 20; memory_working_max_contexts: int = 32; rag_top_k: int = 5; memory_relevance_min_score: float = 0.12
     agent_max_tool_iterations: int = 8; agent_tool_timeout_seconds: float = 60.0; agent_history_limit: int = 12; agent_tool_selection: bool = True; agent_tool_selection_min_confidence: int = 1; agent_allow_write_default: bool = False; agent_auto_approve_sensitive: bool = False; agent_tool_result_strict: bool = True; agent_require_tool_verification: bool = True
