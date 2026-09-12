@@ -58,17 +58,26 @@ class VoicePipeline:
         return self.tts
 
     async def warmup(self, *, wake_word: bool = False, tts: bool = False) -> None:
-        """Pré-carrega componentes pesados antes da primeira interação."""
+        """Pré-carrega STT sem bloquear o caminho de escuta com a inicialização do TTS.
+
+        O Kokoro usa a mesma GPU do STT/LLM e sua construção pode ser relativamente
+        pesada. A escuta precisa ficar disponível assim que o Whisper estiver pronto;
+        o TTS continua lazy e é inicializado somente quando ALPHA realmente precisar
+        falar. Isso evita o estado em que o processo carrega Whisper e depois parece
+        congelado antes de abrir o microfone.
+        """
         stt = self._get_stt()
+        logger.info("[voice] warmup_stt_start wake_word=%s", wake_word)
         if wake_word:
             await stt.warmup_wake()
         await stt.warmup()
+        logger.info("[voice] warmup_stt_ready")
         if tts:
-            await self._warmup_tts()
+            logger.info("[voice] tts_warmup_deferred=true reason=keep_microphone_responsive")
 
     async def _warmup_tts(self) -> None:
-        # Kokoro inicializa o modelo no construtor; mantemos a criação fora do
-        # caminho da primeira fala sem adicionar uma API especial ao modelo.
+        # Mantido para consumidores que decidam aquecer o TTS explicitamente.
+        # A inicialização pesada não faz parte do warmup padrão de escuta.
         await __import__("asyncio").to_thread(self._get_tts)
 
     async def process(self, audio_path: Path) -> dict[str, Any]:
