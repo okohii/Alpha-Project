@@ -7,6 +7,7 @@ from typing import Any
 
 from app.agent.agent import AgentCore
 from app.core.events import EventType
+from app.evidence import Evidence, EvidenceKind, VerificationPolicy, VerificationResult, VerificationService
 from app.llm.base import ExecutionEvidence, LLMMessage, LLMProvider, LLMResponse, ToolCall
 
 _TOOL_INTENT_RE = re.compile(
@@ -33,6 +34,27 @@ _WEATHER_EVIDENCE_TOOLS = frozenset(
 # verificação para não transformar "executado" em "verificado".
 _FAST_POST_TOOL_TOOLS = frozenset({"memory_save", "file_write"})
 
+# Ações externas em que "a tool retornou success" prova somente EXECUTADO.
+# Exigem uma evidência explícita de pós-condição para virar VERIFICADO.
+_STRICT_VERIFICATION_TOOLS = frozenset(
+    {
+        "browser_click",
+        "browser_js",
+        "browser_navigate",
+        "open_app",
+        "open_url",
+        "mouse_click",
+        "type_text",
+        "press_key",
+        "click_text",
+        "run_shell",
+        "run_code",
+        "task_execute",
+        "procedure_run",
+        "macro_run",
+    }
+)
+
 
 class SerializedAgentCore(AgentCore):
     """AgentCore com isolamento operacional e integridade de tool calls."""
@@ -42,6 +64,9 @@ class SerializedAgentCore(AgentCore):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._turn_lock = asyncio.Lock()
+        self._verification_service = VerificationService(
+            VerificationPolicy(require_evidence=True)
+        )
 
     def _conversation_id_for_turn(self, conversation_id: str | None) -> str:
         if conversation_id:
@@ -144,6 +169,62 @@ class SerializedAgentCore(AgentCore):
         if _SYNTHETIC_TOOL_RESPONSE_RE.search(content):
             return "Não posso considerar uma ferramenta executada sem uma chamada nativa real."
         return content
+
+    async def _execute_tool(
+        self,
+        tool_call: ToolCall,
+        permissions: set[Any],
+        conversation_id: str | None,
+        allowed_names: set[str],
+    ) -> tuple[LLMMessage, ExecutionEvidence | None]:
+        """Executa a tool base e transforma o retorno em evidência verificável."""
+        message, execution = await super()._execute_tool(
+            tool_call, permissions, conversation_id, allowed_names
+        )
+        if execution is None:
+            return message, None
+
+        raw = execution.result if isinstance(execution.result, dict) else {}
+        tool_name = execution.tool.split("(", 1)[0]
+        verified = bool(raw.get("verified") is True or raw.get("postcondition_verified") is True)
+
+        # Primeiro aplica o verificador genérico ao retorno. Isso confirma
+        # execução/resultado da própria ferramenta, mas não converte ação GUI
+        # em sucesso de objetivo.
+        tool_result_evidence = Evidence(
+            kind=EvidenceKind.TOOL_RESULT,
+            tool_result={
+                "success": execution.success,
+                "response": raw,
+                "error": execution.error,
+            },
+        )
+        verification = self._verification_service.verify_with_policy(
+            tool_result_evidence,
+            action_name=tool_name,
+        )
+
+        if not execution.success:
+            execution.verified = False
+            execution.status = "failed"
+        elif tool_name in _STRICT_VERIFICATION_TOOLS:
+            execution.verified = verified
+            execution.status = "verified" if verified else "executed_unverified"
+        else:
+            execution.verified = verification is VerificationResult.SUCCESS or verified
+            execution.status = "verified" if execution.verified else "executed_unverified"
+
+        if execution.success and tool_name in _STRICT_VERIFICATION_TOOLS and not execution.verified:
+            self._emit(
+                EventType.honesty_gate,
+                {
+                    "claim": "action_success",
+                    "tool": tool_name,
+                    "executed": True,
+                    "verified": False,
+                },
+            )
+        return message, execution
 
     @staticmethod
     def _fast_post_tool_response(execution: ExecutionEvidence) -> str | None:
@@ -306,6 +387,29 @@ class SerializedAgentCore(AgentCore):
                     "Abri a página solicitada, mas não consegui verificar a previsão "
                     "do tempo a partir do conteúdo da página."
                 )
+
+        # Para ações estritas, sucesso sem pós-condição NÃO autoriza uma frase
+        # de conclusão. Isso impede que "cliquei/enviado/abri" seja inferido
+        # apenas do retorno da função.
+        strict_unverified = [
+            item for item in evidence
+            if item.success
+            and item.tool.split("(", 1)[0] in _STRICT_VERIFICATION_TOOLS
+            and not item.verified
+        ]
+        if strict_unverified and content and (self._claims_success(content) or any(
+            token in content.lower() for token in ("enviei", "mandei", "abri", "cliquei", "digitei")
+        )):
+            self._emit(EventType.honesty_gate, {
+                "claim": "strict_action_success",
+                "tools": [item.tool for item in strict_unverified],
+                "executed": True,
+                "verified": False,
+            })
+            return (
+                "A ação foi executada, mas não consegui verificar a pós-condição. "
+                "Não vou afirmar que ela foi concluída sem essa evidência."
+            )
         return super()._apply_honesty_gate(content, evidence)
 
     async def _save_turn(
