@@ -76,27 +76,21 @@ class AvatarSession:
             try:await self.websocket.send_json(payload)
             except (WebSocketDisconnect,RuntimeError):return
     async def _listen_confirmation_voice(self,pipeline:VoicePipeline)->None:
-        """Listen for a short spoken confirmation without blocking the agent's permission future."""
         deadline=asyncio.get_running_loop().time()+_CONFIRM_TIMEOUT
         while not self.cancel_event.is_set() and asyncio.get_running_loop().time()<deadline:
             try:path=await asyncio.to_thread(audio_io.record_microphone_vad,max_wait=8.0,silence_pad=0.35)
-            except audio_io.MicrophoneRecordingError:
-                return
+            except audio_io.MicrophoneRecordingError:return
             if path is None:continue
             try:result=await pipeline.process(path)
             except Exception:continue
             text=normalize(str(result.get("transcription") or "")).strip(" .,!?;:")
             if not text:continue
-            if text in _CONFIRM_YES or any(text.startswith(word+" ") for word in _CONFIRM_YES):
-                await self._confirm_queue.put(True); return
-            if text in _CONFIRM_NO or any(text.startswith(word+" ") for word in _CONFIRM_NO):
-                await self._confirm_queue.put(False); return
+            if text in _CONFIRM_YES or any(text.startswith(word+" ") for word in _CONFIRM_YES): await self._confirm_queue.put(True); return
+            if text in _CONFIRM_NO or any(text.startswith(word+" ") for word in _CONFIRM_NO): await self._confirm_queue.put(False); return
     async def permission_request(self,candidate:str)->bool:
         display=_parse_confirmation_candidate(candidate);await self.push({"type":"confirmation","kind":display["kind"],"tool":display["tool"],"arguments":display["arguments"]})
-        if hasattr(self,"_confirmation_voice_task") and self._confirmation_voice_task is not None and not self._confirmation_voice_task.done():
-            self._confirmation_voice_task.cancel()
-        pipeline=getattr(self,"_pipeline",None)
-        self._confirmation_voice_task=asyncio.create_task(self._listen_confirmation_voice(pipeline)) if pipeline is not None else None
+        if hasattr(self,"_confirmation_voice_task") and self._confirmation_voice_task is not None and not self._confirmation_voice_task.done(): self._confirmation_voice_task.cancel()
+        pipeline=getattr(self,"_pipeline",None); self._confirmation_voice_task=asyncio.create_task(self._listen_confirmation_voice(pipeline)) if pipeline is not None else None
         try:return await asyncio.wait_for(self._confirm_queue.get(),timeout=_CONFIRM_TIMEOUT)
         except asyncio.TimeoutError:return False
         finally:
@@ -135,6 +129,11 @@ class AvatarSession:
                     except audio_io.MicrophoneRecordingError as exc:await self.push({"type":"error","message":f"microfone indisponível: {exc}"});return
                     if path is None:continue
                     result=await pipeline.process(path);text=(result.get("transcription") or "").strip()
+                    confidence=float(result.get("confidence") or 1.0); suspicious=bool(result.get("is_suspicious"))
+                    normalized=normalize(text).strip(" .,!?;:")
+                    if suspicious or not normalized or normalized in {".","..","...","?","!"}:
+                        logger.warning("[avatar] transcription rejected text=%r confidence=%.3f suspicious=%s",text,confidence,suspicious)
+                        continue
                 if not text:continue
                 decision=self._interaction.decide(text) if self._interaction else None
                 if decision is None or not decision.accepted:
@@ -157,16 +156,16 @@ class AvatarSession:
         audio_path=Path(result["audio_path"])
         try:player,frame_rate,n_frames=await asyncio.to_thread(audio_io.play_wav_async,audio_path)
         except audio_io.AudioPlaybackError as exc:await self.push({"type":"error","message":f"áudio indisponível: {exc}"});return None
-        speech_started=asyncio.Event();abort=threading.Event();loop=asyncio.get_running_loop();recorder=asyncio.create_task(self._capture_onset(pipeline,speech_started,abort,loop));energy_task=asyncio.create_task(self._emit_speech_energy(audio_path));duration=n_frames/frame_rate if frame_rate else 0.0;playback_done=asyncio.create_task(asyncio.sleep(duration+0.25));started_wait=asyncio.create_task(speech_started.wait())
-        await asyncio.wait({playback_done,started_wait},return_when=asyncio.FIRST_COMPLETED)
-        if speech_started.is_set():await asyncio.to_thread(audio_io.stop_wav_async,player);playback_done.cancel();energy_task.cancel()
-        else:started_wait.cancel();abort.set();energy_task.cancel()
-        if speech_started.is_set():
-            try:return await recorder
-            except Exception:return None
-        try:await recorder
-        except Exception:pass
-        await asyncio.to_thread(audio_io.stop_wav_async,player);return None
+        energy_task=asyncio.create_task(self._emit_speech_energy(audio_path))
+        duration=n_frames/frame_rate if frame_rate else 0.0
+        try:
+            await asyncio.sleep(duration + 0.25)
+        finally:
+            energy_task.cancel()
+            await asyncio.to_thread(audio_io.stop_wav_async,player)
+        # Captura novamente só depois que o TTS terminou. Isso evita que o próprio
+        # áudio do ALPHA entre no microfone, seja classificado como voz e corte a frase.
+        return None
     async def _emit_speech_energy(self,audio_path:Path)->None:
         try:
             with wave.open(str(audio_path),"rb") as wav:
@@ -184,11 +183,6 @@ class AvatarSession:
         finally:
             try:self._out.put_nowait({"type":"speech_energy","level":0.0,"peak":0.0})
             except Exception:pass
-    async def _capture_onset(self,pipeline:VoicePipeline,speech_started:asyncio.Event,abort:threading.Event,loop:asyncio.AbstractEventLoop)->str|None:
-        def _signal()->None:loop.call_soon_threadsafe(speech_started.set)
-        path=await asyncio.to_thread(audio_io.record_microphone_vad,on_speech_start=_signal,abort_event=abort)
-        if path is None:return None
-        result=await pipeline.process(path);return (result.get("transcription") or "").strip() or None
 
 
 @router.websocket("/ws")
