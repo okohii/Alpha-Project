@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -56,6 +57,23 @@ def _is_usable_text(text: str) -> bool:
     return len(_ALNUM_RE.sub("", cleaned)) >= 2
 
 
+def _decoded_confidence(segments: list[dict[str, Any]], language_probability: float) -> float:
+    if not segments:
+        return 0.0
+    scores: list[float] = []
+    for segment in segments:
+        logprob = segment.get("avg_logprob")
+        no_speech = segment.get("no_speech_prob")
+        if isinstance(logprob, (int, float)):
+            log_score = max(0.0, min(1.0, math.exp(float(logprob))))
+        else:
+            log_score = 0.5
+        speech_score = 1.0 - max(0.0, min(1.0, float(no_speech))) if isinstance(no_speech, (int, float)) else 0.5
+        scores.append((log_score + speech_score) / 2.0)
+    decoded = sum(scores) / len(scores)
+    return max(0.0, min(1.0, decoded * max(0.0, min(1.0, float(language_probability)))))
+
+
 class FasterWhisperSTT(SpeechToText):
     """STT using Faster-Whisper; audio segmentation is owned by ALPHA's capture VAD."""
     def __init__(self) -> None:
@@ -86,8 +104,8 @@ class FasterWhisperSTT(SpeechToText):
         collected=[]; text_parts=[]
         for segment in segments:
             collected.append({"start":segment.start,"end":segment.end,"text":segment.text,"avg_logprob":getattr(segment,"avg_logprob",None),"no_speech_prob":getattr(segment,"no_speech_prob",None)}); text_parts.append(segment.text)
-        text="".join(text_parts).strip(); usable=_is_usable_text(text); text_len=len(_ALNUM_RE.sub("",text))
-        confidence = float(getattr(info,"language_probability",1.0) or 1.0) if collected else 0.0
-        is_suspicious=(not usable) or (confidence<0.3 and text_len<3) or (text_len>0 and confidence<0.5)
-        logger.info("[stt] transcribe_end duration=%.2fs text=%r confidence=%.3f usable=%s suspicious=%s segments=%d",duration,text,confidence,usable,is_suspicious,len(collected))
+        text="".join(text_parts).strip(); usable=_is_usable_text(text); text_len=len(_ALNUM_RE.sub("",text)); language_probability=float(getattr(info,"language_probability",1.0) or 1.0)
+        confidence=_decoded_confidence(collected,language_probability)
+        is_suspicious=(not usable) or (confidence<0.35) or (text_len>0 and confidence<0.55)
+        logger.info("[stt] transcribe_end duration=%.2fs text=%r confidence=%.3f language_probability=%.3f usable=%s suspicious=%s segments=%d",duration,text,confidence,language_probability,usable,is_suspicious,len(collected))
         return TranscriptionResult(text=text,language=info.language or self.settings.stt_language,segments=collected,confidence=confidence,is_suspicious=is_suspicious,is_usable=usable)
