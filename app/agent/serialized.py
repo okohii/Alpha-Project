@@ -9,25 +9,19 @@ from app.agent.agent import AgentCore
 from app.core.events import EventType
 from app.llm.base import LLMMessage, LLMProvider, LLMResponse
 
-
 _TOOL_INTENT_RE = re.compile(
-    r"(?:vou|vamos|irei|iremos|usarei|utilizarei|vou\s+usar|vou\s+realizar|"
-    r"vou\s+fazer|vou\s+pesquisar|vou\s+consultar|vou\s+abrir|vou\s+salvar|"
-    r"vou\s+executar|vou\s+verificar|vou\s+buscar)\s+[^.\n]{0,180}",
+    r"(?:vou|vamos|irei|iremos|usarei|utilizarei)\s+[^.\n]{0,180}",
+    re.IGNORECASE,
+)
+_SYNTHETIC_TOOL_RESPONSE_RE = re.compile(
+    r"<\s*(?:tool_response|tool_result|function_response)\b|"
+    r"\[\s*(?:resultado da ferramenta|tool_response)\b",
     re.IGNORECASE,
 )
 
 
 class SerializedAgentCore(AgentCore):
-    """AgentCore com isolamento operacional e integridade de tool calls.
-
-    Além de serializar turnos e preservar ``role=tool`` no histórico, esta
-    camada impede que o modelo trate uma descrição textual de uma ferramenta
-    como se ela tivesse sido executada. Quando o modelo diz que vai usar uma
-    tool, mas não emite uma chamada nativa, fazemos UMA nova passagem pedindo
-    explicitamente o tool calling nativo. Se falhar novamente, o texto não é
-    convertido em execução.
-    """
+    """AgentCore com isolamento operacional e integridade de tool calls."""
 
     _conversation_by_bus: dict[int, str] = {}
 
@@ -70,14 +64,36 @@ class SerializedAgentCore(AgentCore):
         tools: list[dict[str, Any]],
         stream_tokens: bool,
     ) -> LLMResponse:
-        """Exige tool calling nativo quando o modelo só descreve a ação."""
+        """Exige tool calling nativo somente quando há intenção inequívoca."""
         response = await super()._provider_turn(provider, messages, tools, stream_tokens)
         if response.tool_calls or not response.content or not tools:
             return response
-        if not self._looks_like_tool_intent(response.content, tools):
+
+        content = response.content.strip()
+        available_names = self._available_tool_names(tools)
+        lower = content.lower()
+        mentions_known_tool = any(name.lower() in lower for name in available_names)
+        strong_intent = bool(_TOOL_INTENT_RE.search(content)) and mentions_known_tool
+
+        # O modelo pode tentar imitar o protocolo com XML/texto. Isso nunca é
+        # uma execução real; não fazemos uma segunda geração só por causa disso.
+        if _SYNTHETIC_TOOL_RESPONSE_RE.search(content):
+            self._emit(
+                EventType.agent_progress,
+                {
+                    "kind": "synthetic_tool_response_blocked",
+                    "available_tools": sorted(available_names),
+                },
+            )
+            return LLMResponse(
+                content="Não posso considerar uma ferramenta executada sem uma chamada nativa real.",
+                tool_calls=None,
+                raw=response.raw,
+            )
+
+        if not strong_intent:
             return response
 
-        available_names = self._available_tool_names(tools)
         self._emit(
             EventType.agent_progress,
             {
@@ -90,12 +106,12 @@ class SerializedAgentCore(AgentCore):
             LLMMessage(
                 role="system",
                 content=(
-                    "INTEGRIDADE DE TOOL CALL: sua resposta anterior descreveu uma "
-                    "ferramenta, mas nenhuma chamada nativa foi emitida. NÃO diga que "
-                    "vai usar a ferramenta. Se a tarefa realmente exige uma ferramenta "
-                    "disponível, emita agora uma tool call nativa. Se não exigir, responda "
-                    "sem alegar que pesquisou, abriu, salvou ou executou algo. "
-                    "Nunca escreva JSON de tool call no texto."
+                    "INTEGRIDADE DE TOOL CALL: a resposta anterior mencionou uma "
+                    "ferramenta disponível, mas não emitiu uma chamada nativa. "
+                    "Se a tarefa exige essa ferramenta, emita UMA tool call nativa agora. "
+                    "Não escreva JSON, XML, <tool_response>, <tool_result> ou qualquer "
+                    "simulação textual. Se não conseguir emitir a chamada nativa, responda "
+                    "honestamente sem alegar que a ação foi executada."
                 ),
             ),
         )
@@ -127,15 +143,18 @@ class SerializedAgentCore(AgentCore):
         lower = content.lower()
         mentions_tool = any(name in lower for name in available)
         strong_intent = bool(_TOOL_INTENT_RE.search(content))
-        return mentions_tool or strong_intent
+        return mentions_tool and strong_intent
+
+    @staticmethod
+    def _scrub_synthetic_tool_response(content: str) -> str:
+        """Remove simulações textuais de resultados de ferramenta."""
+        if not content:
+            return content
+        if _SYNTHETIC_TOOL_RESPONSE_RE.search(content):
+            return "Não posso considerar uma ferramenta executada sem uma chamada nativa real."
+        return content
 
     def _expand_tools(self, allowed: set[str], called: list[str]) -> set[str]:
-        """Não abre novas skills no meio da execução.
-
-        A seleção inicial do SkillRegistry é a única fonte de exposição. Isso
-        impede que uma chamada alucinada seja usada como pivô para revelar todo
-        o catálogo de outra skill durante o mesmo turno.
-        """
         return set(allowed)
 
     async def _save_turn(
@@ -144,11 +163,6 @@ class SerializedAgentCore(AgentCore):
         user_message: str,
         turn_messages: list[LLMMessage],
     ) -> None:
-        """Persiste a cadeia causal completa do turno.
-
-        Ordem obrigatória:
-        user -> assistant(tool_calls) -> tool(result) -> assistant(final)
-        """
         await self._save_message(conversation_id, "user", user_message)
         for message in turn_messages:
             if message.role not in {"assistant", "tool"}:
@@ -156,7 +170,7 @@ class SerializedAgentCore(AgentCore):
             await self._save_message(
                 conversation_id,
                 message.role,
-                message.content,
+                self._scrub_synthetic_tool_response(message.content),
                 tool_calls=message.tool_calls,
             )
 
