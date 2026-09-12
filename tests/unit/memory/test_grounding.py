@@ -20,18 +20,18 @@ from app.tools.registry import ToolRegistry
 
 
 class FakeRow:
-    """Fake de MemoryModel suficiente para o repositório."""
-
     def __init__(self, content: str, embedding) -> None:
         self.id = str(uuid.uuid4())
         self.content = content
         self.memory_type = "semantic"
         self.source = "test"
         self.importance = 1.0
+        self.confidence = 1.0
         self.embedding = embedding
         self.metadata_ = {}
         self.created_at = datetime.now(UTC)
         self.updated_at = datetime.now(UTC)
+        self.expiration = None
 
 
 class _Scalars:
@@ -114,7 +114,7 @@ async def test_agent_memory_context_only_relevant():
 
     class GroundedService:
         async def search_memories(self, query, limit=5, min_score=0.0):
-            assert min_score > 0  # agente corta por relevância
+            assert min_score > 0
             results = await MemoryRepository(FakeSession(rows)).search_by_embedding(
                 await provider.embed(query), limit=limit, keyword=query, min_score=min_score
             )
@@ -137,19 +137,13 @@ async def test_agent_memory_context_only_relevant():
 
     await agent.chat("Quem é Ellen?")
 
-    system_texts = [
-        m.content for m in seen_messages[0] if m.role == "system"
-    ]
+    system_texts = [m.content for m in seen_messages[0] if m.role == "system"]
     memory_block = next(
-        (text for text in system_texts if "Registros de conversas anteriores" in text),
-        "",
+        (text for text in system_texts if "Registros de conversas anteriores" in text), ""
     )
-    # bloco de memória existe e o rótulo deixa claro que NÃO é instrução
     assert memory_block != ""
     assert "NÃO são ações executadas" in memory_block
-    # memória relevante presente
     assert "Ellen é amiga" in memory_block or "Ellen." in memory_block
-    # memórias irrelevantes de ação/clima NÃO aparecem no contexto
     assert "WhatsApp" not in memory_block
     assert "clima" not in memory_block
     assert "Psyche" not in memory_block
