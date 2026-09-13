@@ -5,12 +5,14 @@ import base64
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from app.security.api_gate import EXECUTE_ACTION, require_local_api_auth
 from app.speech.pipeline import VoicePipeline
 
 router = APIRouter(prefix="/voice", tags=["voice"])
+_EXEC = Depends(require_local_api_auth(EXECUTE_ACTION))
 
 
 class SpeakRequest(BaseModel):
@@ -26,7 +28,6 @@ class TranscribeResponse(BaseModel):
 async def _save_uploaded_audio(file: UploadFile) -> Path:
     if file.filename is None or not file.filename.strip():
         raise HTTPException(status_code=400, detail="Arquivo de áudio inválido")
-
     suffix = Path(file.filename).suffix or ".wav"
     temp_dir = Path(tempfile.mkdtemp(prefix="alpha-voice-"))
     audio_path = temp_dir / f"upload{suffix}"
@@ -38,52 +39,33 @@ async def _save_uploaded_audio(file: UploadFile) -> Path:
 
 
 @router.post("/transcribe")
-async def transcribe(file: UploadFile | None = File(default=None)) -> dict:
+async def transcribe(file: UploadFile | None = File(default=None), _auth=_EXEC) -> dict:
     if file is None:
         return {"text": "", "language": "", "segments": []}
-
     audio_path = await _save_uploaded_audio(file)
     pipeline = VoicePipeline()
     result = await pipeline.process(audio_path)
-    return {
-        "text": result.get("transcription", ""),
-        "language": result.get("language", ""),
-        "segments": result.get("segments", []),
-    }
+    return {"text": result.get("transcription", ""), "language": result.get("language", ""), "segments": result.get("segments", [])}
 
 
 @router.post("/speak")
-async def speak(payload: SpeakRequest) -> dict:
+async def speak(payload: SpeakRequest, _auth=_EXEC) -> dict:
     pipeline = VoicePipeline()
     result = await pipeline.speak(payload.text)
-
     if result.get("status") == "ok":
         audio_path = Path(result["audio_path"])
-
         def _encode_wav() -> str:
             payload_bytes = audio_path.read_bytes() if audio_path.exists() else b""
             return base64.b64encode(payload_bytes).decode("utf-8")
-
         audio_b64 = await asyncio.to_thread(_encode_wav)
-        return {
-            "status": "ok",
-            "text": payload.text,
-            "audio_base64": audio_b64,
-            "mime_type": "audio/wav",
-        }
-
-    return {
-        "status": result.get("status", "text_only"),
-        "detail": result.get("detail"),
-        "text": payload.text,
-    }
+        return {"status": "ok", "text": payload.text, "audio_base64": audio_b64, "mime_type": "audio/wav"}
+    return {"status": result.get("status", "text_only"), "detail": result.get("detail"), "text": payload.text}
 
 
 @router.post("/process")
-async def process_voice(file: UploadFile | None = File(default=None)) -> dict:
+async def process_voice(file: UploadFile | None = File(default=None), _auth=_EXEC) -> dict:
     if file is None:
         return {"status": "error", "detail": "arquivo de áudio não enviado"}
-
     audio_path = await _save_uploaded_audio(file)
     pipeline = VoicePipeline()
     return await pipeline.process(audio_path)
