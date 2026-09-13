@@ -4,17 +4,18 @@ from fastapi import APIRouter, Depends
 
 from app.core.config import get_settings
 from app.db.session import get_session
+from app.security.api_gate import EXECUTE_ACTION, require_local_api_auth
 from app.tasks.service import ManagedPathRepository
 
 router = APIRouter(tags=["settings"])
+_EXEC = Depends(require_local_api_auth(EXECUTE_ACTION))
 
 
 @router.get("/settings")
-async def settings(session=Depends(get_session)) -> dict:
+async def settings(session=Depends(get_session), _auth=_EXEC) -> dict:
     config = get_settings()
-    from app.llm.router import LLMRouter
-
-    router_state = LLMRouter().describe_current()
+    from app.runtime.application import get_shared_llm_router
+    router_state = get_shared_llm_router().describe_current()
     records = await ManagedPathRepository(session).list()
     allowed_directories = [record.path for record in records if getattr(record, "is_allowed", 1)]
     if not allowed_directories:
