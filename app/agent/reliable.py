@@ -95,16 +95,22 @@ class ReliableAgentCore(SerializedAgentCore):
                 return step
         return None
 
+    def _skill_tools_for_step(self, step: Any) -> set[str]:
+        if self.skill_registry is None:
+            return set()
+        skill_name = self.skill_registry.skill_for_tool(step.tool_hint)
+        if not skill_name:
+            return set()
+        return set(self.skill_registry.get_tools_for_skills([skill_name]))
+
     def _initial_tool_names(self, task: str, permissions: set[Any]) -> set[str]:
         names = super()._initial_tool_names(task, permissions)
         step = self._plan_pending_step()
         if step is None:
             return names
         planned = {step.tool_hint}
-        if self.skill_registry is not None:
-            skill_name = self.skill_registry.skill_for_tool(step.tool_hint)
-            if skill_name:
-                planned.update(self.skill_registry.get_tools_for_skills([skill_name]))
+        if getattr(step, "status", "pending") == "failed":
+            planned.update(self._skill_tools_for_step(step))
         planned &= names | {"verify_screen"}
         narrowed = (names & _OBSERVATION_TOOLS) | planned
         return narrowed or names
@@ -114,10 +120,7 @@ class ReliableAgentCore(SerializedAgentCore):
         step = self._plan_pending_step()
         if step is None:
             return expanded
-        if self.skill_registry is not None:
-            skill_name = self.skill_registry.skill_for_tool(step.tool_hint)
-            if skill_name:
-                expanded.update(self.skill_registry.get_tools_for_skills([skill_name]))
+        expanded.update(self._skill_tools_for_step(step))
         expanded.add(step.tool_hint)
         expanded.update(_OBSERVATION_TOOLS & set(self.tool_registry.tools))
         return expanded
@@ -132,10 +135,6 @@ class ReliableAgentCore(SerializedAgentCore):
         if response.tool_calls or not tools or self._complexity.level is Complexity.SIMPLE:
             return response
 
-        # Diagóstico estrutural: tarefa acionável com tools expostas, mas o
-        # modelo retornou texto sem tool call nativa. Não deixamos isso ser
-        # silencioso — registramos e, quando a rota primária é cloud, tentamos
-        # UMA vez a rota local (modelo causal com tool calling nativo).
         exposed = sorted(
             tool["function"]["name"] if isinstance(tool.get("function"), dict) else tool.get("name", "")
             for tool in tools
@@ -172,6 +171,14 @@ class ReliableAgentCore(SerializedAgentCore):
         for step in plan.steps:
             if step.tool_hint == tool_name and step.status not in {"completed", "cancelled"}:
                 return step
+        # Após falha, uma ferramenta alternativa da MESMA skill pode concluir
+        # o passo. Isso permite recuperação por estratégia diferente sem abrir
+        # o plano para uma ferramenta arbitrária.
+        for step in plan.steps:
+            if getattr(step, "status", "pending") != "failed":
+                continue
+            if tool_name in self._skill_tools_for_step(step):
+                return step
         return None
 
     def _update_plan_checkpoint(self, execution: ExecutionEvidence) -> None:
@@ -199,11 +206,13 @@ class ReliableAgentCore(SerializedAgentCore):
     async def _execute_tool(self, tool_call, permissions, conversation_id, allowed_names):
         step = self._plan_pending_step()
         if step is not None and self._complexity.requires_plan and tool_call.name not in _OBSERVATION_TOOLS and tool_call.name != step.tool_hint:
-            self._emit(EventType.task_failed, {"step_id": step.id, "tool": tool_call.name, "error": "tool fora do passo atual do plano"})
-            return (
-                self._tool_result_message(tool_call.name, success=False, response={}, error=f"A ferramenta '{tool_call.name}' não corresponde ao passo atual '{step.tool_hint}'. Execute primeiro o passo planejado." , tool_call_id=tool_call.id),
-                ExecutionEvidence(action_id=f"rejected-{step.id}", tool=tool_call.name, arguments=dict(tool_call.arguments or {}), executed_at="not-executed", success=False, result={}, error="tool fora do passo atual do plano", status="failed", session_id=getattr(self, "session_id", ""), conversation_id=conversation_id),
-            )
+            allowed_recovery_tools = self._skill_tools_for_step(step) if getattr(step, "status", "pending") == "failed" else set()
+            if tool_call.name not in allowed_recovery_tools:
+                self._emit(EventType.task_failed, {"step_id": step.id, "tool": tool_call.name, "error": "tool fora do passo atual do plano"})
+                return (
+                    self._tool_result_message(tool_call.name, success=False, response={}, error=f"A ferramenta '{tool_call.name}' não corresponde ao passo atual '{step.tool_hint}'. Execute primeiro o passo planejado." , tool_call_id=tool_call.id),
+                    ExecutionEvidence(action_id=f"rejected-{step.id}", tool=tool_call.name, arguments=dict(tool_call.arguments or {}), executed_at="not-executed", success=False, result={}, error="tool fora do passo atual do plano", status="failed", session_id=getattr(self, "session_id", ""), conversation_id=conversation_id),
+                )
         message, execution = await super()._execute_tool(tool_call, permissions, conversation_id, allowed_names)
         if execution is None or not execution.success:
             if execution is not None:
@@ -213,7 +222,6 @@ class ReliableAgentCore(SerializedAgentCore):
         if not self._complexity.requires_verification or tool_name not in STRICT_VERIFICATION_TOOLS or tool_name == "verify_screen" or execution.verified:
             self._update_plan_checkpoint(execution)
             return message, execution
-        # P27: limite de verificações visuais por turno.
         max_vision = self.settings.agent_max_vision_verifications
         if self._vision_verifications >= max_vision:
             execution.verified = False
