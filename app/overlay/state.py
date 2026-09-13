@@ -1,28 +1,13 @@
 from __future__ import annotations
 
-from enum import StrEnum
-
 from app.core.events import EventType
+from app.core.interaction_state import InteractionPhase, phase_for_event
 
 
-class OverlayState(StrEnum):
-    IDLE = "idle"
-    LISTENING = "listening"
-    THINKING = "thinking"
-    PLANNING = "planning"
-    EXECUTING = "executing"
-    VERIFYING = "verifying"
-    SPEAKING = "speaking"
-    ERROR = "error"
+# O overlay expõe apenas o subconjunto de fases relevantes à UI compacta.
+OverlayState = InteractionPhase
 
-
-# Mapeamento EventBus → estado do overlay.
-#
-# Regra: eventos são transitivos (o próximo evento pode sobrescrever o
-# estado). Estados "de borda" (LISTENING/THINKING/EXECUTING etc.) são
-# inferidos dos eventos que o AgentCore já emite — o overlay NÃO decide
-# nada sobre o fluxo do agente, apenas reflete.
-EVENT_TO_STATE: dict[EventType, OverlayState] = {
+EVENT_TO_STATE = {
     EventType.assistant_listening: OverlayState.LISTENING,
     EventType.assistant_transcribing: OverlayState.LISTENING,
     EventType.agent_started: OverlayState.THINKING,
@@ -36,29 +21,25 @@ EVENT_TO_STATE: dict[EventType, OverlayState] = {
     EventType.agent_cancelled: OverlayState.IDLE,
 }
 
-# Eventos que representam retorno da ferramenta → voltam a "pensar" até o
-# próximo passo (não ficam presos em EXECUTING).
-_POST_TOOL_STATE: dict[EventType, OverlayState] = {
+# Mantido para consumidores antigos que importam os mapas diretamente.
+_POST_TOOL_STATE = {
     EventType.tool_finished: OverlayState.THINKING,
     EventType.tool_failed: OverlayState.THINKING,
     EventType.verification_completed: OverlayState.THINKING,
 }
 
-# Eventos que carregam nome de ferramenta para exibir no rodapé.
 TOOL_EVENTS: set[EventType] = {
     EventType.tool_started,
     EventType.tool_finished,
     EventType.tool_failed,
 }
 
-# Eventos que carregam texto para o histórico.
 TEXT_EVENTS: set[EventType] = {
     EventType.user_message,
     EventType.assistant_message,
     EventType.token_stream,
 }
 
-# Eventos terminais de uma rodada: o overlay deve liberar o input.
 TERMINAL_EVENTS: set[EventType] = {
     EventType.agent_finished,
     EventType.agent_failed,
@@ -67,7 +48,8 @@ TERMINAL_EVENTS: set[EventType] = {
 
 
 def state_for_event(event_type: EventType) -> OverlayState | None:
-    """Estado a partir de um tipo de evento (None = não muda o estado)."""
-    if event_type in _POST_TOOL_STATE:
-        return _POST_TOOL_STATE[event_type]
+    """Estado canônico compartilhado, convertido para a API histórica do overlay."""
+    phase = phase_for_event(event_type)
+    if phase is not None:
+        return phase
     return EVENT_TO_STATE.get(event_type)
