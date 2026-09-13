@@ -10,8 +10,6 @@ from typing import Any
 
 @dataclass(slots=True)
 class OCRResult:
-    """Resultado do OCR extraído de uma captura de tela ou elemento."""
-
     text: str
     confidence: float
     bounding_box: dict[str, int] | None = None
@@ -42,12 +40,7 @@ class OCREvidence:
 
 
 class OCRPerceptor:
-    """OCR real, com Tesseract opcional e sem evidência inventada.
-
-    O motor é descoberto em PATH. A integração é deliberadamente opcional para
-    manter o ALPHA leve: quando Tesseract não existe, ``available`` é falso e o
-    orquestrador deve preferir UIA/DOM/Vision.
-    """
+    """OCR real opcional via Tesseract, sem inventar evidência."""
 
     def __init__(self, executable: str | None = None, language: str = "por+eng") -> None:
         self.executable = executable or shutil.which("tesseract")
@@ -57,7 +50,7 @@ class OCRPerceptor:
     def available(self) -> bool:
         return bool(self.executable)
 
-    async def perceive(self, image_path: str | None = None, *, text: str | None = None) -> OCREvidence:
+    def perceive(self, image_path: str | None = None, *, text: str | None = None) -> OCREvidence:
         if text is not None:
             return OCREvidence(result=OCRResult(text=text, confidence=1.0), image_path=image_path, success=True)
         if not image_path or not self.available:
@@ -66,10 +59,14 @@ class OCRPerceptor:
         if not path.exists():
             return OCREvidence(result=None, image_path=image_path, success=False)
         try:
-            result = await asyncio.to_thread(self._run_tesseract, path)
+            result = self._run_tesseract(path)
         except (OSError, subprocess.SubprocessError):
             return OCREvidence(result=None, image_path=image_path, success=False)
         return OCREvidence(result=result, image_path=image_path, success=True)
+
+    async def aperceive(self, image_path: str | None = None, *, text: str | None = None) -> OCREvidence:
+        """Versão assíncrona para não bloquear o event loop com OCR pesado."""
+        return await asyncio.to_thread(self.perceive, image_path, text=text)
 
     def _run_tesseract(self, image_path: Path) -> OCRResultFull:
         assert self.executable is not None
@@ -78,7 +75,6 @@ class OCRPerceptor:
         if completed.returncode != 0:
             raise subprocess.SubprocessError(completed.stderr.strip() or "Tesseract falhou")
         text = completed.stdout.strip()
-        # A saída TSV permite confiança e caixas sem depender de bindings Python.
         tsv = subprocess.run(
             [self.executable, str(image_path), "stdout", "-l", self.language, "--psm", "6", "tsv"],
             capture_output=True, text=True, timeout=30, check=False,
@@ -105,19 +101,11 @@ class OCRPerceptor:
         return OCRResultFull(overall_text=text, pages=[page], success=True)
 
     def verify_action_text(self, before: dict[str, Any] | None, after: dict[str, Any] | None, action_name: str) -> dict[str, Any]:
-        found = False
         expected = action_name.lower()
-        if after and isinstance(after, dict):
-            found = expected in str(after.get("text", "")).lower()
-        if before and isinstance(before, dict) and expected in str(before.get("text", "")).lower():
-            found = False
-        return {
-            "action": action_name,
-            "text_found": found,
-            "expected": action_name,
-            "after_text_snippet": str(after.get("text", ""))[:100] if after else "",
-            "before_text_snippet": str(before.get("text", ""))[:100] if before else "",
-        }
+        after_text = str(after.get("text", "")) if after else ""
+        before_text = str(before.get("text", "")) if before else ""
+        found = expected in after_text.lower() and expected not in before_text.lower()
+        return {"action": action_name, "text_found": found, "expected": action_name, "after_text_snippet": after_text[:100], "before_text_snippet": before_text[:100]}
 
 
 __all__ = ["OCRResult", "OCRResultPage", "OCRResultFull", "OCREvidence", "OCRPerceptor"]
