@@ -11,13 +11,18 @@ from app.core.config import get_settings
 _MIN_VISUAL_CONFIDENCE = 0.80
 
 _vision_sem: asyncio.Semaphore | None = None
+_vision_sem_limit: int | None = None
 
 
 def _acquire_vision_slot() -> asyncio.Semaphore:
-    global _vision_sem
+    global _vision_sem, _vision_sem_limit
     max_concurrent = max(1, int(get_settings().vision_max_concurrent))
-    if _vision_sem is None or _vision_sem._value != max_concurrent:
+    # Não inspecione ``Semaphore._value``: ele representa slots DISPONÍVEIS e
+    # diminui durante uma chamada concorrente. Recriar o semáforo nesse momento
+    # eliminaria justamente o limite de concorrência que queremos preservar.
+    if _vision_sem is None or _vision_sem_limit != max_concurrent:
         _vision_sem = asyncio.Semaphore(max_concurrent)
+        _vision_sem_limit = max_concurrent
     return _vision_sem
 
 
