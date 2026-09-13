@@ -23,6 +23,7 @@ dependencies = [
   "faster-whisper>=1.0.3,<2.0",
   "kokoro>=0.9.4,<1.0",
   "sounddevice>=0.4.6,<1.0",
+  "soundfile>=0.12,<1.0",
   "numpy>=1.26,<3.0",
   "pypdf>=5.0,<6.0",
   "python-docx>=1.1,<2.0",
