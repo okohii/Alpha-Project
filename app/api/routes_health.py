@@ -36,7 +36,9 @@ async def health_llm(_auth=_EXEC) -> dict:
 async def health_database(_auth=_EXEC) -> dict:
     """Verificação REAL da conexão com o banco (SELECT 1)."""
     from sqlalchemy import text
+
     from app.db.session import AsyncSessionLocal
+
     try:
         async with AsyncSessionLocal() as session:
             await session.execute(text("SELECT 1"))
@@ -53,4 +55,5 @@ async def metrics_endpoint(_auth=_EXEC) -> str:
 
 async def collect_health() -> dict:
     from app.services.health import collect_health as _collect_health
+
     return await _collect_health()
