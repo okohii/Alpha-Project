@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import webbrowser
 from dataclasses import dataclass, field
@@ -228,7 +229,7 @@ class TaskExecutorService:
         if action == "create_method":
             return self._create_method_in_file(**params)
         if action == "persist_repo_changes":
-            return self._persist_repo_changes(**params)
+            return await asyncio.to_thread(self._persist_repo_changes, **params)
         if action == "open_browser":
             browser = params.get("browser", "default")
             url = str(params.get("url") or params.get("query") or "https://www.google.com")

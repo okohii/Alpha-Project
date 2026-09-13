@@ -5,8 +5,11 @@ from pydantic import BaseModel, Field
 
 from app.db.session import get_session
 from app.runtime import build_agent
+from app.security.api_gate import EXECUTE_ACTION, require_local_api_auth
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+_EXEC = Depends(require_local_api_auth(EXECUTE_ACTION))
 
 
 class ChatRequest(BaseModel):
@@ -24,6 +27,7 @@ class ChatResponse(BaseModel):
 async def chat(
     payload: ChatRequest,
     session=Depends(get_session),
+    _auth=_EXEC,
 ) -> ChatResponse:
     agent = await build_agent(session)
     result = await agent.chat(

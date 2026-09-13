@@ -4,8 +4,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from app.agent.agent import (
+    RETRY_STRATEGY_HINT,
+    classify_failure,
+)
 from app.agent.serialized import SerializedAgentCore
 from app.core.events import EventType
+from app.execution.models import STRICT_VERIFICATION_TOOLS
 from app.llm.base import ExecutionEvidence, LLMMessage, LLMProvider, LLMResponse
 from app.llm.router import ollama_available
 
@@ -51,12 +56,6 @@ class ComplexityGate:
         return ComplexityDecision(Complexity.SIMPLE, False, False, "interação curta e de baixo custo operacional")
 
 
-_STRICT_TOOLS = frozenset({
-    "browser_click", "browser_js", "browser_open", "browser_navigate",
-    "open_app", "open_url", "open_file", "close_app", "move_app",
-    "mouse_click", "mouse_scroll", "type_text", "press_key", "click_text",
-    "run_shell", "run_code", "task_execute", "procedure_run", "macro_run",
-})
 _OBSERVATION_TOOLS = frozenset({"time", "system_info", "memory_search", "screenshot", "verify_screen"})
 
 
@@ -68,9 +67,11 @@ class ReliableAgentCore(SerializedAgentCore):
         self.complexity_gate = ComplexityGate()
         self._complexity = ComplexityDecision(Complexity.SIMPLE, False, False, "sem tarefa ainda")
         self._active_task = ""
+        self._vision_verifications = 0
 
     async def _run_agent_loop(self, provider: LLMProvider, messages: list[LLMMessage], permissions: set[Any], conversation_id: str | None = None, stream_tokens: bool = False, task: str = "", context: Any | None = None, expose_tools: bool = True) -> tuple[LLMResponse, list[LLMMessage]]:
         self._active_task = task
+        self._vision_verifications = 0  # P27: máximo de verificações visuais por turno
         self._complexity = self.complexity_gate.classify(task)
         self._emit(EventType.agent_progress, {"kind": "complexity_gate", "level": self._complexity.level.value, "requires_plan": self._complexity.requires_plan, "requires_verification": self._complexity.requires_verification, "reason": self._complexity.reason})
         plan = getattr(self, "_plan", None)
@@ -181,9 +182,11 @@ class ReliableAgentCore(SerializedAgentCore):
         step.attempts += 1
         if not execution.success:
             step.status = "failed"
-            self._emit(EventType.task_failed, {"step_id": step.id, "tool": tool_name, "error": execution.error or "falha"})
+            failure_class = classify_failure(execution.error or "")
+            step.last_failure_class = failure_class
+            self._emit(EventType.task_failed, {"step_id": step.id, "tool": tool_name, "error": execution.error or "falha", "failure_class": failure_class, "retry_strategy": RETRY_STRATEGY_HINT.get(failure_class)})
             return
-        if tool_name in _STRICT_TOOLS and not execution.verified:
+        if tool_name in STRICT_VERIFICATION_TOOLS and not execution.verified:
             step.status = "running"
             self._emit(EventType.verification_started, {"step_id": step.id, "tool": tool_name, "expected": step.expected_evidence})
             return
@@ -199,7 +202,7 @@ class ReliableAgentCore(SerializedAgentCore):
             self._emit(EventType.task_failed, {"step_id": step.id, "tool": tool_call.name, "error": "tool fora do passo atual do plano"})
             return (
                 self._tool_result_message(tool_call.name, success=False, response={}, error=f"A ferramenta '{tool_call.name}' não corresponde ao passo atual '{step.tool_hint}'. Execute primeiro o passo planejado." , tool_call_id=tool_call.id),
-                ExecutionEvidence(action_id=f"rejected-{step.id}", tool=tool_call.name, arguments=dict(tool_call.arguments or {}), executed_at="not-executed", success=False, result={}, error="tool fora do passo atual do plano", status="failed"),
+                ExecutionEvidence(action_id=f"rejected-{step.id}", tool=tool_call.name, arguments=dict(tool_call.arguments or {}), executed_at="not-executed", success=False, result={}, error="tool fora do passo atual do plano", status="failed", session_id=getattr(self, "session_id", ""), conversation_id=conversation_id),
             )
         message, execution = await super()._execute_tool(tool_call, permissions, conversation_id, allowed_names)
         if execution is None or not execution.success:
@@ -207,15 +210,26 @@ class ReliableAgentCore(SerializedAgentCore):
                 self._update_plan_checkpoint(execution)
             return message, execution
         tool_name = execution.tool.split("(", 1)[0]
-        if not self._complexity.requires_verification or tool_name not in _STRICT_TOOLS or tool_name == "verify_screen" or execution.verified:
+        if not self._complexity.requires_verification or tool_name not in STRICT_VERIFICATION_TOOLS or tool_name == "verify_screen" or execution.verified:
             self._update_plan_checkpoint(execution)
             return message, execution
+        # P27: limite de verificações visuais por turno.
+        max_vision = self.settings.agent_max_vision_verifications
+        if self._vision_verifications >= max_vision:
+            execution.verified = False
+            execution.status = "executed_unverified"
+            self._update_plan_checkpoint(execution)
+            return message, execution
+        self._vision_verifications += 1
         verifier = self.tool_registry.get("verify_screen") if "verify_screen" in self.tool_registry.tools else None
         if verifier is None:
             self._update_plan_checkpoint(execution)
             return message, execution
         verify_goal = self._active_task or (getattr(getattr(self, "_plan", None), "expected_result", None) or tool_name)
         self._emit(EventType.verification_started, {"tool": tool_name, "goal": verify_goal})
+        from app.services.health.metrics import metrics
+
+        metrics.incr("alpha_verifications_total", labels={"tool": tool_name})
         try:
             verify_result = await verifier.execute(goal=verify_goal, max_retries=0)
         except Exception as exc:
@@ -234,7 +248,7 @@ class ReliableAgentCore(SerializedAgentCore):
 
     def _apply_honesty_gate(self, content: str, evidence: list[ExecutionEvidence]) -> str:
         result = super()._apply_honesty_gate(content, evidence)
-        unverified = [item for item in evidence if item.success and item.tool.split("(", 1)[0] in _STRICT_TOOLS and not item.verified]
+        unverified = [item for item in evidence if item.success and item.tool.split("(", 1)[0] in STRICT_VERIFICATION_TOOLS and not item.verified]
         if unverified and result == content and self._complexity.requires_verification:
             self._emit(EventType.honesty_gate, {"claim": "unverified_strict_action", "tools": [item.tool for item in unverified], "executed": True, "verified": False})
             return "A ação foi executada, mas não consegui confirmar a pós-condição. Não vou afirmar que ela foi concluída sem essa evidência."

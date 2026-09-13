@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -7,11 +8,11 @@ from typing import Any
 
 from app.core.config import get_settings
 from app.core.events import EventBus, EventType
-from app.perception.stt import FasterWhisperSTT
 from app.speech.cleaning import clean_for_voice
 from app.speech.delivery import DeliveryProcessor, DeliveryProfile
 from app.speech.emotion import EmotionController, EmotionState
 from app.speech.listener import AudioListener, PushToTalkAudioListener
+from app.speech.providers import get_shared_stt, get_shared_tts
 from app.speech.tts import KokoroTTS, TextToSpeechError
 
 logger = logging.getLogger("app.speech.pipeline")
@@ -36,7 +37,7 @@ def _is_internal_content(text: str) -> bool:
 
 
 class VoicePipeline:
-    def __init__(self, listener: AudioListener | None = None, stt: FasterWhisperSTT | None = None, tts: KokoroTTS | None = None, event_bus: EventBus | None = None, emotion_controller: EmotionController | None = None, delivery_processor: DeliveryProcessor | None = None) -> None:
+    def __init__(self, listener: AudioListener | None = None, stt: Any | None = None, tts: KokoroTTS | None = None, event_bus: EventBus | None = None, emotion_controller: EmotionController | None = None, delivery_processor: DeliveryProcessor | None = None) -> None:
         self.listener = listener or PushToTalkAudioListener()
         self.stt = stt
         self.tts = tts
@@ -47,24 +48,22 @@ class VoicePipeline:
     def _bus(self) -> EventBus:
         return self.event_bus or EventBus()
 
-    def _get_stt(self) -> FasterWhisperSTT:
+    def _get_stt(self):
         if self.stt is None:
-            self.stt = FasterWhisperSTT()
+            self.stt = get_shared_stt()
         return self.stt
 
-    def _get_tts(self) -> KokoroTTS:
+    def _get_tts(self):
         if self.tts is None:
-            self.tts = KokoroTTS()
+            self.tts = get_shared_tts()
         return self.tts
 
     async def warmup(self, *, wake_word: bool = False, tts: bool = False) -> None:
-        """Pré-carrega STT sem bloquear o caminho de escuta com a inicialização do TTS.
+        """Pré-carrega STT/TTS sem bloquear o caminho de escuta.
 
         O Kokoro usa a mesma GPU do STT/LLM e sua construção pode ser relativamente
-        pesada. A escuta precisa ficar disponível assim que o Whisper estiver pronto;
-        o TTS continua lazy e é inicializado somente quando ALPHA realmente precisar
-        falar. Isso evita o estado em que o processo carrega Whisper e depois parece
-        congelado antes de abrir o microfone.
+        pesada. O TTS é aquecido em THREAD em BACKGROUND (não bloqueia o loop nem a
+        prontidão da escuta): a primeira fala reutiliza o provedor cacheado.
         """
         stt = self._get_stt()
         logger.info("[voice] warmup_stt_start wake_word=%s", wake_word)
@@ -73,20 +72,28 @@ class VoicePipeline:
         await stt.warmup()
         logger.info("[voice] warmup_stt_ready")
         if tts:
-            logger.info("[voice] tts_warmup_deferred=true reason=keep_microphone_responsive")
+            logger.info("[voice] tts_warmup_background=true reason=keep_microphone_responsive")
+            try:
+                self._tts_warmup = asyncio.create_task(asyncio.to_thread(self._get_tts))
+            except Exception:  # pragma: no cover - warmup falha não bloqueia escuta
+                logger.warning("[voice] tts_warmup_task_failed", exc_info=True)
 
     async def _warmup_tts(self) -> None:
-        # Mantido para consumidores que decidam aquecer o TTS explicitamente.
-        # A inicialização pesada não faz parte do warmup padrão de escuta.
-        await __import__("asyncio").to_thread(self._get_tts)
+        # Aquecimento funcional: garante construção do TTS fora do loop.
+        await asyncio.to_thread(self._get_tts)
 
     async def process(self, audio_path: Path) -> dict[str, Any]:
+        from app.services.health.metrics import metrics, record, start_capture
+
         event_bus = self._bus()
         event_bus.emit(EventType.assistant_listening)
         await self.listener.start()
         try:
             event_bus.emit(EventType.assistant_transcribing)
+            started_at = start_capture()
             transcription = await self._get_stt().transcribe(audio_path)
+            record("stt", started_at)
+            metrics.incr("alpha_stt_calls_total")
             logger.info("[voice] stt text=%r confidence=%.3f suspicious=%s language=%s segments=%d", transcription.text, transcription.confidence, transcription.is_suspicious, transcription.language, len(transcription.segments))
             return {"transcription": transcription.text, "language": transcription.language, "segments": transcription.segments, "confidence": transcription.confidence, "is_suspicious": transcription.is_suspicious}
         finally:
@@ -125,7 +132,13 @@ class VoicePipeline:
                 profile = self.emotion_controller.build_profile(state)
             event_bus = self._bus()
             event_bus.emit(EventType.assistant_speaking, {"emotion":state.emotion.value,"intensity":state.intensity,"confidence":state.confidence,"delivery":profile.to_dict() if profile is not None else None})
-            audio_path = await self._get_tts().synthesize(prepared, delivery=profile)
+            tts = await asyncio.to_thread(self._get_tts)
+            from app.services.health.metrics import metrics, record, start_capture
+
+            started_at = start_capture()
+            audio_path = await tts.synthesize(prepared, delivery=profile)
+            record("tts", started_at)
+            metrics.incr("alpha_tts_calls_total")
             logger.info("[tts] synthesized path=%s", audio_path)
             return {"audio_path":str(audio_path),"status":"ok","emotion":state.to_dict(),"delivery":profile.to_dict() if profile is not None else None,"text":prepared}
         except TextToSpeechError as exc:
@@ -152,5 +165,6 @@ class VoicePipeline:
             state = emotion if emotion is not None else self.emotion_controller.resolve(prepared)
             profile = self.emotion_controller.build_profile(state)
         self._bus().emit(EventType.assistant_speaking, {"emotion":state.emotion.value,"intensity":state.intensity,"confidence":state.confidence,"delivery":profile.to_dict()})
-        async for path in self._get_tts().synthesize_stream(prepared, delivery=profile):
+        tts = await asyncio.to_thread(self._get_tts)
+        async for path in tts.synthesize_stream(prepared, delivery=profile):
             yield {"audio_path": str(path), "emotion": state.to_dict(), "delivery": profile.to_dict(), "text": prepared}

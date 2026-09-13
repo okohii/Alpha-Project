@@ -14,13 +14,15 @@ from fastapi.responses import FileResponse
 from app.avatar.controller import AvatarController
 from app.avatar.mapping import AnimationMapping
 from app.avatar.renderer import AvatarCommand
+from app.core.bounded import put_dropping_oldest
 from app.core.config import get_settings
 from app.core.events import EventBus, EventType, SystemEvent
+from app.core.presentation import parse_confirmation_candidate
 from app.db.session import AsyncSessionLocal
 from app.interaction import InteractionManager
 from app.perception.wakeword import find_wake_word, normalize, strip_wake_prefix
 from app.runtime import build_agent
-from app.security import SENSITIVE_PREFIX
+from app.security.wsauth import validate_websocket_connection, ws_client_host
 from app.speech import audio_io
 from app.speech.cleaning import clean_markdown_artifacts
 from app.speech.emotion import EmotionState
@@ -41,19 +43,18 @@ class AvatarWSRenderer:
         self._out = out
 
     def show(self, command: AvatarCommand) -> None:
-        self._out.put_nowait({"type": "state", "state": command.state.value, "animation": command.animation, "expression": command.expression, "emotion": command.emotion, "idle_after_ms": command.idle_after_ms})
-
-
-def _parse_confirmation_candidate(candidate: str) -> dict[str, str]:
-    if candidate.startswith(SENSITIVE_PREFIX):
-        rest = candidate[len(SENSITIVE_PREFIX):]
-        tool_name, sep, args = rest.partition(": ")
-        return {"kind": "action", "tool": tool_name.strip() if sep else rest.strip(), "arguments": args.strip() if sep else ""}
-    return {"kind": "path", "tool": "permissão de acesso", "arguments": candidate}
+        put_dropping_oldest(
+            self._out,
+            {"type": "state", "state": command.state.value, "animation": command.animation, "expression": command.expression, "emotion": command.emotion, "idle_after_ms": command.idle_after_ms},
+        )
 
 
 def _is_exit(text: str) -> bool:
     return normalize(text).strip(" .,!?;:") in _EXIT_WORDS
+
+
+# Re-export de compatibilidade (fonte única em app.core.presentation).
+_parse_confirmation_candidate = parse_confirmation_candidate
 
 
 def _capture_kwargs(settings: Any) -> dict[str, Any]:
@@ -106,7 +107,7 @@ class AvatarSession:
     def __init__(self, websocket: WebSocket) -> None:
         self.websocket = websocket
         self.event_bus = EventBus()
-        self._out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._out: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=512)
         self.avatar = AvatarController(renderer=AvatarWSRenderer(self._out), mapping=AnimationMapping())
         self.avatar.subscribe(self.event_bus)
         self.event_bus.subscribe_all(self._forward_agent_event)
@@ -119,6 +120,9 @@ class AvatarSession:
         self.conversation_id: str | None = None
         self._interaction: InteractionManager | None = None
 
+    def _out_dropped(self) -> None:
+        logger.warning("[avatar] fila de saída da UI cheia: descartou eventos antigos")
+
     @property
     def state(self) -> str:
         return self.avatar.state.value
@@ -126,7 +130,7 @@ class AvatarSession:
     def _forward_agent_event(self, event: SystemEvent) -> None:
         if event.type in _EXECUTION_EVENTS:
             try:
-                self._out.put_nowait(_execution_payload(event))
+                put_dropping_oldest(self._out, _execution_payload(event), on_drop=self._out_dropped)
             except Exception:
                 pass
 
@@ -305,50 +309,60 @@ class AvatarSession:
                         # próximo turno, que será transcrito pelo small.
                         if not wake_command:
                             continue
-                        # Mesmo quando existe command_hint, a maior acurácia
-                        # vem da transcrição full do small, não do tiny.
-                        full_failed = False
-                        full_text = ""
-                        full_confidence = 0.0
-                        full_suspicious = True
-                        try:
-                            result = await pipeline.process(path)
-                        except Exception:
-                            full_failed = True
-                            logger.exception("[avatar] full transcription failed")
-                        else:
-                            full_text = (result.get("transcription") or "").strip()
-                            full_confidence = float(result.get("confidence") or 0.0)
-                            full_suspicious = bool(result.get("is_suspicious"))
-                        kind, text = _choose_after_wake(
-                            full_text=full_text,
-                            full_confidence=full_confidence,
-                            full_suspicious=full_suspicious,
-                            full_failed=full_failed,
-                            wake_command=wake_command,
-                            wake_confidence=wake_confidence,
-                            min_command_confidence=settings.wake_command_min_confidence,
-                        )
-                        if kind == "skip":
+                        # Fase 4.4: hint do wake com confiança ALTA evita a
+                        # segunda passada full STT (uma captura = uma transcrição).
+                        # Duplicar STT a cada wake era o maior custo de latência.
+                        if wake_confidence >= settings.wake_command_min_confidence and not wake_suspicious:
+                            text = wake_command
                             logger.info(
-                                "[avatar] command skip wake_confidence=%.3f full_confidence=%.3f reason=insufficient_confidence",
-                                wake_confidence,
-                                full_confidence,
-                            )
-                            await self.push({"type": "caption", "from": "alpha", "text": "Pode repetir?"})
-                            continue
-                        if kind == "hint":
-                            logger.info(
-                                "[avatar] command source=hint wake_confidence=%.3f command=%r",
+                                "[avatar] command source=wake_hint confidence=%.3f command=%r",
                                 wake_confidence,
                                 text,
                             )
                         else:
-                            logger.info(
-                                "[avatar] command source=full confidence=%.3f command=%r",
-                                full_confidence,
-                                text,
+                            # Confiança insuficiente: a maior acurácia vem do full.
+                            full_failed = False
+                            full_text = ""
+                            full_confidence = 0.0
+                            full_suspicious = True
+                            try:
+                                result = await pipeline.process(path)
+                            except Exception:
+                                full_failed = True
+                                logger.exception("[avatar] full transcription failed")
+                            else:
+                                full_text = (result.get("transcription") or "").strip()
+                                full_confidence = float(result.get("confidence") or 0.0)
+                                full_suspicious = bool(result.get("is_suspicious"))
+                            kind, text = _choose_after_wake(
+                                full_text=full_text,
+                                full_confidence=full_confidence,
+                                full_suspicious=full_suspicious,
+                                full_failed=full_failed,
+                                wake_command=wake_command,
+                                wake_confidence=wake_confidence,
+                                min_command_confidence=settings.wake_command_min_confidence,
                             )
+                            if kind == "skip":
+                                logger.info(
+                                    "[avatar] command skip wake_confidence=%.3f full_confidence=%.3f reason=insufficient_confidence",
+                                    wake_confidence,
+                                    full_confidence,
+                                )
+                                await self.push({"type": "caption", "from": "alpha", "text": "Pode repetir?"})
+                                continue
+                            if kind == "hint":
+                                logger.info(
+                                    "[avatar] command source=hint wake_confidence=%.3f command=%r",
+                                    wake_confidence,
+                                    text,
+                                )
+                            else:
+                                logger.info(
+                                    "[avatar] command source=full confidence=%.3f command=%r",
+                                    full_confidence,
+                                    text,
+                                )
                     else:
                         # Sessão ativa: uma única transcrição completa é a fonte
                         # de verdade para o comando do usuário.
@@ -423,6 +437,15 @@ class AvatarSession:
         return EmotionState.from_dict(payload) if isinstance(payload, dict) else None
 
     async def _speak_interruptible(self, pipeline: VoicePipeline, text: str, emotion: EmotionState | None) -> str | None:
+        settings = get_settings()
+        if settings.tts_streaming and hasattr(pipeline, "speak_streaming"):
+            try:
+                return await self._speak_interruptible_streaming(pipeline, text, emotion)
+            except Exception as exc:
+                logger.warning("[avatar] streaming TTS falhou; fallback para arquivo único: %s", exc)
+        return await self._speak_interruptible_single(pipeline, text, emotion)
+
+    async def _speak_interruptible_single(self, pipeline: VoicePipeline, text: str, emotion: EmotionState | None) -> str | None:
         result = await pipeline.speak_expressive(text, emotion=emotion)
         if result.get("status") != "ok":
             await self.push({"type": "error", "message": str(result.get("detail") or "tts indisponível")})
@@ -477,6 +500,75 @@ class AvatarSession:
             await asyncio.to_thread(audio_io.stop_wav_async, player)
         return None
 
+    async def _speak_interruptible_streaming(self, pipeline: VoicePipeline, text: str, emotion: EmotionState | None) -> str | None:
+        """Playback por segmentos (TTS streaming): o primeiro chunk toca enquanto
+        os seguintes são gerados — corta a latência de resposta (Fase 4.5)."""
+        playback_interrupted = threading.Event()
+        player: Any = None
+        started = False
+
+        def on_speech_start() -> None:
+            nonlocal player
+            if playback_interrupted.is_set():
+                return
+            playback_interrupted.set()
+            logger.info("[avatar] user speech detected during TTS streaming; stopping playback")
+            try:
+                if player is not None:
+                    audio_io.stop_wav_async(player)
+            except Exception:
+                logger.debug("[avatar] failed to stop streaming TTS on speech start", exc_info=True)
+
+        self._interrupt_abort.clear()
+        self._interruption_task = None
+        total_duration = 0.0
+        try:
+            async for item in pipeline.speak_streaming(text, emotion=emotion):
+                if playback_interrupted.is_set():
+                    return None
+                audio_path = Path(item["audio_path"])
+                if not started:
+                    await self.push({"type": "avatar_show", "animation": "speak", "duration_ms": 320})
+                    await self.push({"type": "state", "state": "speaking", "animation": "speak", "expression": None, "emotion": emotion.to_dict() if emotion else None, "idle_after_ms": 4000})
+                    started = True
+                try:
+                    player, frame_rate, n_frames = await asyncio.to_thread(audio_io.play_wav_async, audio_path)
+                except audio_io.AudioPlaybackError:
+                    continue
+                duration = n_frames / frame_rate if frame_rate else 0.0
+                total_duration += duration
+                if self._interruption_task is None or self._interruption_task.done():
+                    self._interruption_task = asyncio.create_task(
+                        self._listen_for_interruption(pipeline, duration + 1.0, on_speech_start)
+                    )
+                playback_wait = asyncio.create_task(asyncio.sleep(duration + 0.25))
+                done, _ = await asyncio.wait(
+                    {self._interruption_task, playback_wait}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if self._interruption_task in done:
+                    interrupted_text = self._interruption_task.result()
+                    if interrupted_text:
+                        return interrupted_text
+                    if not playback_wait.done():
+                        await playback_wait
+                else:
+                    try:
+                        interrupted_text = await asyncio.wait_for(self._interruption_task, timeout=0.45)
+                    except asyncio.TimeoutError:
+                        interrupted_text = None
+                    if interrupted_text:
+                        return interrupted_text
+        finally:
+            self._interrupt_abort.set()
+            if self._interruption_task is not None and not self._interruption_task.done():
+                self._interruption_task.cancel()
+                await asyncio.gather(self._interruption_task, return_exceptions=True)
+            self._interruption_task = None
+            if player is not None:
+                await asyncio.to_thread(audio_io.stop_wav_async, player)
+            await self.push({"type": "state", "state": "listening", "animation": "idle", "expression": None, "emotion": None, "idle_after_ms": max(320, int(total_duration * 1000))})
+        return None
+
     async def _emit_speech_energy(self, audio_path: Path) -> None:
         try:
             with wave.open(str(audio_path), "rb") as wav:
@@ -501,19 +593,36 @@ class AvatarSession:
                     max_sample = float((1 << (8 * width - 1)) - 1)
                     level = min(1.0, rms / max_sample * 2.2)
                     peak_level = min(1.0, peak / max_sample)
-                    self._out.put_nowait({"type": "speech_energy", "level": level, "peak": peak_level})
+                    put_dropping_oldest(
+                        self._out,
+                        {"type": "speech_energy", "level": level, "peak": peak_level},
+                        on_drop=self._out_dropped,
+                    )
                     await asyncio.sleep(min(0.04, max(0.01, chunk / rate)))
         except Exception:
             logger.debug("[avatar] speech energy indisponível", exc_info=True)
         finally:
             try:
-                self._out.put_nowait({"type": "speech_energy", "level": 0.0, "peak": 0.0})
+                put_dropping_oldest(
+                    self._out,
+                    {"type": "speech_energy", "level": 0.0, "peak": 0.0},
+                    on_drop=self._out_dropped,
+                )
             except Exception:
                 pass
 
 
 @router.websocket("/ws")
 async def avatar_ws(websocket: WebSocket) -> None:
+    origin = websocket.headers.get("origin")
+    client_host = ws_client_host(websocket)
+    ok, reason = validate_websocket_connection(origin, client_host)
+    if not ok:
+        logger.warning(
+            "[avatar] ws rejeitado origin=%r host=%r motivo=%s", origin, client_host, reason
+        )
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     logger.debug("[avatar] ws connected")
     session = AvatarSession(websocket)

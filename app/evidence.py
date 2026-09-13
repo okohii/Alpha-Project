@@ -12,19 +12,36 @@ class VerificationResult(IntEnum):
 
 
 class EvidenceKind(StrEnum):
+    """Contrato único de tipos de evidência.
+
+    ``VISION`` e ``ACCESSIBILITY_TREE`` nomeiam fontes reais de percepção.
+    ``INFERENCE`` marca suposição do modelo/agente — NUNCA deve ser tratada
+    como prova de sucesso. ``ERROR`` registra falha observada.
+    """
+
     TOOL_RESULT = "tool_result"
     DOM_STATE = "dom_state"
+    ACCESSIBILITY_TREE = "accessibility_tree"
     ACCESSIBILITY_STATE = "accessibility_state"
     SCREENSHOT = "screenshot"
+    SCREEN = "screen"
     OCR = "ocr"
+    VISION = "vision"
     FILESYSTEM_STATE = "filesystem_state"
     APPLICATION_STATE = "application_state"
     API_RESPONSE = "api_response"
+    VERIFIED_STATE = "verified_state"
+    INFERENCE = "inference"
+    ERROR = "error"
 
 
 @dataclass(slots=True)
 class Evidence:
-    """Structured observation produced by an execution or perception step."""
+    """Structured observation produced by an execution or perception step.
+
+    ``success`` é o veredito da FONTE (executado/observado), não prova de que
+    a meta do usuário foi alcançada. ``verified`` é metadado da verificação.
+    """
 
     kind: EvidenceKind
     tool_result: Any | None = None
@@ -35,6 +52,12 @@ class Evidence:
     filesystem_state: Any | None = None
     application_state: Any | None = None
     api_response: Any | None = None
+    source: str = ""
+    timestamp: str = ""
+    confidence: float | None = None
+    target: str = ""
+    details: Any | None = None
+    success: bool | None = None
     # ``verified`` is metadata about this observation, not proof of success.
     verified: bool = False
 

@@ -3,12 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.macros.service import macro_service
+from app.security.api_gate import EXECUTE_ACTION, require_local_api_auth
 
 router = APIRouter(prefix="/macros", tags=["macros"])
+
+_EXEC = Depends(require_local_api_auth(EXECUTE_ACTION))
 
 
 # ── Pydantic models ────────────────────────────────────────────────────
@@ -82,7 +85,7 @@ async def list_macros(enabled_only: bool = True):
 
 
 @router.post("", response_model=MacroOut)
-async def create_macro(data: MacroCreate):
+async def create_macro(data: MacroCreate, _auth=_EXEC):
     steps = [s.model_dump() for s in data.steps]
     macro = await macro_service.create_macro(
         name=data.name,
@@ -103,7 +106,7 @@ async def get_macro(macro_id: str):
 
 
 @router.put("/{macro_id}", response_model=MacroOut)
-async def update_macro(macro_id: str, data: MacroUpdate):
+async def update_macro(macro_id: str, data: MacroUpdate, _auth=_EXEC):
     update_data = data.model_dump(exclude_unset=True)
     if "steps" in update_data:
         update_data["steps"] = [s.model_dump() for s in update_data["steps"]]
@@ -114,7 +117,7 @@ async def update_macro(macro_id: str, data: MacroUpdate):
 
 
 @router.delete("/{macro_id}")
-async def delete_macro(macro_id: str):
+async def delete_macro(macro_id: str, _auth=_EXEC):
     ok = await macro_service.delete_macro(macro_id)
     if not ok:
         raise HTTPException(404, "Macro não encontrada")
@@ -122,7 +125,7 @@ async def delete_macro(macro_id: str):
 
 
 @router.post("/{macro_id}/execute")
-async def execute_macro(macro_id: str, request: ExecuteRequest):
+async def execute_macro(macro_id: str, request: ExecuteRequest, _auth=_EXEC):
     try:
         log = await macro_service.execute_macro(macro_id, request.parameters)
         return log.to_dict()
@@ -140,7 +143,7 @@ async def list_schedules(enabled_only: bool = True):
 
 
 @router.post("/schedules", response_model=ScheduleOut)
-async def create_schedule(data: ScheduleCreate):
+async def create_schedule(data: ScheduleCreate, _auth=_EXEC):
     try:
         scheduled = await macro_service.schedule_macro(
             macro_id=data.macro_id,
@@ -154,7 +157,7 @@ async def create_schedule(data: ScheduleCreate):
 
 
 @router.delete("/schedules/{schedule_id}")
-async def cancel_schedule(schedule_id: str):
+async def cancel_schedule(schedule_id: str, _auth=_EXEC):
     ok = await macro_service.cancel_scheduled(schedule_id)
     if not ok:
         raise HTTPException(404, "Agendamento não encontrado")

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 import app.runtime.application as application_module
@@ -88,8 +86,12 @@ async def test_sensitive_confirmation_does_not_pollute_allowed_directories(monke
 
 
 @pytest.mark.anyio
-async def test_real_path_permission_registers_directory(monkeypatch):
-    """Path real (AccessDeniedError) continua sendo adicionado ao whitelist."""
+async def test_real_path_permission_grant_is_memory_only(monkeypatch):
+    """H7/Parte 19: confirmação de UM path não vira permissão permanente.
+
+    O grant é adicionado APENAS em memória (escopo do agente) e NÃO é
+    persistido no banco como allowlist global.
+    """
     granted: list[str] = []
 
     async def permission_prompt(candidate: str) -> bool:
@@ -112,10 +114,8 @@ async def test_real_path_permission_registers_directory(monkeypatch):
 
     assert result is True
     assert granted == [candidate]
-    expected_path = str(Path(candidate).expanduser().resolve())
-    assert repo.registered == [
-        (expected_path, "directory", "permission_request"),
-    ]
+    # NADA foi persistido; o grant ficou em memória.
+    assert repo.registered == []
 
 
 @pytest.mark.anyio

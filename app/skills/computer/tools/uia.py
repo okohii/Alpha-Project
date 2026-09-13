@@ -7,6 +7,7 @@ False e as tools retornam erro amigável (o fluxo por coordenadas continua).
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -308,7 +309,8 @@ class ClickTextTool(Tool):
                 error="Informe o texto a clicar.",
             )
         try:
-            result = click_text(text, window_hint=hint)
+            # UIA é COM/blocking: fora do event loop (P-3).
+            result = await asyncio.to_thread(click_text, text, window_hint=hint)
         except UiaError as exc:
             return ToolResult(name=self.name, success=False, data={}, error=exc)
         return ToolResult(name=self.name, success=True, data=result)
@@ -348,7 +350,7 @@ class ReadUiTool(Tool):
             )
         hint = str(kwargs.get("hint", "") or "") or None
         try:
-            elements = read_ui_text(window_hint=hint)
+            elements = await asyncio.to_thread(read_ui_text, window_hint=hint)
         except UiaError as exc:
             return ToolResult(name=self.name, success=False, data={}, error=exc)
         return ToolResult(

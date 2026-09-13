@@ -18,8 +18,13 @@ from app.memory.policies import is_expired, retrieval_score
 _TOKEN_RE = re.compile(r"[a-zA-Z\u00C0-\u017F0-9]+")
 
 
-class MemoryRepository(Protocol):
-    """Backend-neutral memory contract used by MemoryService/Agent."""
+class MemoryRepositoryProtocol(Protocol):
+    """Backend-neutral memory contract used by MemoryService/Agent.
+
+    Interface, nunca implementação: ``SqliteMemoryRepository`` (abaixo) é a
+    implementação concreta. O alias antigo ``MemoryRepository`` foi removido
+    (Parte 43) para impedir confundir Protocol com classe concreta.
+    """
 
     async def list(self, limit: int = 100, memory_type: str | None = None) -> list[Any]: ...
     async def get(self, memory_id: str) -> Any | None: ...
@@ -36,9 +41,6 @@ class MemoryRepository(Protocol):
         context: dict[str, Any] | None = None,
     ) -> list[Any]: ...
     async def purge_expired(self) -> int: ...
-
-
-MemoryRepositoryProtocol = MemoryRepository
 
 
 def cosine_similarity(a: Sequence[float] | None, b: Sequence[float] | None) -> float:
@@ -184,7 +186,11 @@ class SqliteMemoryRepository:
                 context_score=context_score,
                 now=now,
             )
-            if score >= min_score:
+            # min_score é o corte de RELEVÂNCIA: memória sem relevância não
+            # passa mesmo sendo importante/recorrerte (piso de importância não
+            # contamina o filtro). Ranking continua pelo score composto.
+            relevance = max(0.0, min(1.0, similarity))
+            if relevance >= min_score:
                 scored.append((memory, score))
 
         scored.sort(key=lambda pair: pair[1], reverse=True)
@@ -217,7 +223,6 @@ class SqliteMemoryRepository:
 
 __all__ = [
     "MemoryRecord",
-    "MemoryRepository",
     "MemoryRepositoryProtocol",
     "SqliteMemoryRepository",
     "cosine_similarity",

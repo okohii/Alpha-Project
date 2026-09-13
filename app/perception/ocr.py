@@ -44,41 +44,31 @@ class OCREvidence:
 
 
 class OCRPerceptor:
-    """Perceptor de OCR (Optical Character Recognition).
+    """Perceptor de OCR.
 
-    Extrai texto de capturas de tela ou elementos da interface.
-    Deve ser usado quando o DOM e a árvore de acessibilidade não
-    contêm informações suficientes (ex.: canvas, imagens, fundos).
-
-    A prioridade é:
-    1. Texto de elementos interativos visíveis (botões, links, menus)
-    2. Texto de mensagens de sucesso/erro
-    3. Texto livre em áreas da tela
-    4. Texto em canvas ou elementos sem acesso estruturado
+    OCR real (Tesseract/PaddleOCR) NÃO está implementado: ``available``
+    é ``False`` por padrão. Sem motor real, NUNCA fazemos de conta que
+    conseguimos extrair texto de uma imagem — a superfície é reduzida e o
+    orquestrador ignora OCR quando indisponível.
     """
 
-    def perceive(self, image_path: str | None = None, *, text: str | None = None) -> OCREvidence:
-        """Percebe texto via OCR.
+    available: bool = False
 
-        Em release futuro integraria um motor OCR (Tesseract, PaddleOCR, etc.).
-        Por enquanto, aceita texto fornecido diretamente ou simula
-        extração de uma captura.
+    def perceive(self, image_path: str | None = None, *, text: str | None = None) -> OCREvidence:
+        """Percebe texto.
+
+        Só produz evidência quando há TEXTO REAL fornecido pela fonte (ex.:
+        DOM/acessibilidade) — nunca simula extração de uma imagem sem motor.
         """
+        if not self.available and text is None:
+            return OCREvidence(result=None, image_path=image_path, success=False)
         if text is not None:
-            # Texto fornecido diretamente (simulação de OCR bem-sucedido)
             return OCREvidence(
                 result=OCRResult(text=text, confidence=1.0),
                 image_path=image_path,
                 success=True,
             )
-
-        # Placeholder: em um release futuro faria chamadas OCR real.
-        # Por agora, retorna evidence indeterminado quando não há texto.
-        return OCREvidence(
-            result=None,
-            image_path=image_path,
-            success=False,
-        )
+        return OCREvidence(result=None, image_path=image_path, success=False)
 
     def verify_action_text(
         self,

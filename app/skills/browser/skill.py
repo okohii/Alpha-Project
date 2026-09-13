@@ -22,7 +22,6 @@ SKILL = Skill(
         "browser_click",
         "browser_wait",
         "browser_screenshot",
-        "open_url",
     ],
 )
 

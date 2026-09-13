@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from pathlib import Path
@@ -98,11 +99,11 @@ class CloseAppTool(Tool):
                 name=self.name, success=False, data={}, error="Informe o aplicativo a fechar."
             )
         try:
-            info = self.launcher.resolve(app)
+            info = await asyncio.to_thread(self.launcher.resolve, app)
         except ValueError as exc:
             return ToolResult(name=self.name, success=False, data={}, error=str(exc))
 
-        running = running_process_names()
+        running = await asyncio.to_thread(running_process_names)
         candidates = candidate_process_names(info.get("app", ""), info.get("path"))
         matched = _match_running(candidates, running)
         if not matched:
@@ -112,7 +113,7 @@ class CloseAppTool(Tool):
                 data={"app": info.get("app", app), "running": False},
                 error=None,
             )
-        result = close_processes(matched)
+        result = await asyncio.to_thread(close_processes, matched)
         return ToolResult(
             name=self.name,
             success=not result["errors"],

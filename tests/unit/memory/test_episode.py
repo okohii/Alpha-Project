@@ -35,8 +35,11 @@ class FakeRepository:
         self.items.append(memory)
         return memory
 
-    async def list(self, limit: int = 100):
-        return list(self.items[:limit])
+    async def list(self, limit: int = 100, memory_type: str | None = None):
+        items = self.items
+        if memory_type:
+            items = [item for item in items if getattr(item, "memory_type", None) == memory_type]
+        return list(items[:limit])
 
     async def search_by_embedding(self, embedding, limit: int = 5):
         return list(self.items[:limit])
@@ -82,7 +85,8 @@ async def test_save_episode_stores_preference_at_max_importance():
     saved = await service.save_episode("sempre abra o discord no monitor 2", "ok, anotado")
 
     assert saved is not None
-    assert saved.memory_type == "preferencia"
+    # P46: contrato único de tipo de memória (MemoryType).
+    assert saved.memory_type == "preference"
     assert saved.importance == 1.0
     assert saved.source == "agent"
     assert saved.metadata["episode"] is True
@@ -96,8 +100,10 @@ async def test_save_episode_keeps_tool_turns_above_threshold():
     )
 
     assert saved is not None
-    assert saved.memory_type == "semantic"
+    # P46: turno com tools vira episódio (MemoryType.EPISODIC) com importância alta.
+    assert saved.memory_type == "episodic"
     assert saved.importance == 0.85
+    assert saved.metadata["tools"] == ["open_app", "verify_screen"]
 
 
 @pytest.mark.anyio

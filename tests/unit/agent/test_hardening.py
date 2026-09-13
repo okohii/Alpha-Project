@@ -808,49 +808,16 @@ def test_caso5_quem_e_ellen_selects_memory_not_action():
     assert "memory_search" in names
 
 
-# ---------------------------------------------------------------------------
-# 10. Fast Path — nunca é uma segunda arquitetura de execução
-# ---------------------------------------------------------------------------
+def test_fallback_tools_are_registered_and_go_through_registry():
+    """O conjunto fallback do AgentCore existe no ToolRegistry."""
+    from app.agent.agent import FALLBACK_TOOLS
+
+    for tool_name in FALLBACK_TOOLS:
+        assert tool_name in registry_tool_names(), tool_name
 
 
-def test_fastpath_match_is_metadata_not_execution():
-    """O FastPathRouter apenas produz um match; a EXECUÇÃO fica no AgentCore.
-
-    Regra: nenhum caminho pode executar Tool/Service fora de
-    ExecutionContext → permission → ToolRegistry → ToolResult → Evidence.
-    """
-    from app.agent.router import FastPathMatch, build_default_fast_path_router
-
-    router = build_default_fast_path_router()
-    match = router.match("abra o chrome")
-    assert isinstance(match, FastPathMatch)
-    assert match.tool == "open_app"
-    # O próprio router não tem ToolRegistry/Service: execução é impossível aqui.
-    assert not hasattr(router, "execute")
-    assert not hasattr(router, "tool_registry")
-
-
-def test_fastpath_tools_are_registered_and_go_through_registry():
-    """Todos os tools referenciados pelo Fast Path existem no ToolRegistry."""
-    from app.agent.router import build_default_fast_path_router
+def registry_tool_names() -> set[str]:
     from app.tools.registry import build_default_tool_registry
 
-    build_default_fast_path_router()
     registry = build_default_tool_registry(memory_service=FakeMemoryService())
-    assert "open_app" in registry.tools
-    assert "open_url" in registry.tools
-    assert "web_search" in registry.tools
-    assert "file_read" in registry.tools
-    assert "memory_search" in registry.tools
-
-
-def test_no_service_bypass_in_fast_path():
-    """Nenhum utilitário do Fast Path executa tools/serviços diretamente."""
-    import inspect
-
-    from app.agent.router import FastPathMatch, FastPathRule
-
-    for cls in (FastPathMatch, FastPathRule):
-        source = inspect.getsource(cls)
-        assert ".execute" not in source
-        assert "import" not in source or "from " not in source
+    return set(registry.tools)

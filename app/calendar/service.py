@@ -247,18 +247,14 @@ class CalendarRepository:
         return list(result.scalars().all())
 
     async def list_due(self, now: datetime) -> list[CalendarEventRecord]:
-        """Lista eventos com ação que devem ser executados."""
-        from sqlalchemy import select
+        """(Removido) Agendamento de AÇÕES no calendário não está implementado.
 
-        statement = (
-            select(CalendarEventRecord)
-            .where(CalendarEventRecord.enabled == 1)
-            .where(CalendarEventRecord.action.isnot(None))
-            .where(CalendarEventRecord.next_run_at <= now)
-            .order_by(CalendarEventRecord.next_run_at)
-        )
-        result = await self.session.execute(statement)
-        return list(result.scalars().all())
+        O modelo não persiste ``action``/``next_run_at``. Uma tarefa agendada
+        só poderá existir quando o pipeline de reavaliação de segurança
+        estiver pronto (Parte 15/16). Listar eventos expirados sem ação
+        seria uma capacidade falsa.
+        """
+        return []
 
     async def delete(self, event_id: str) -> None:
         record = await self.get(event_id)

@@ -7,9 +7,20 @@ from html import escape
 from queue import Empty, Queue
 from typing import Any
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer, Qt
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
 from PySide6.QtGui import QCursor, QFont
-from PySide6.QtWidgets import QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.core.config import get_settings
 from app.overlay.astral_core import AstralCore
@@ -33,8 +44,11 @@ class _WebSocketThread(threading.Thread):
             except Exception: pass
         if self.is_alive() and threading.current_thread() is not self: self.join(max(0.0, timeout))
     def run(self) -> None:
-        try: import websocket
-        except ImportError: self.incoming.put({"type":"error","message":"websocket-client não instalado"}); return
+        try:
+            import websocket
+        except ImportError:
+            self.incoming.put({"type":"error","message":"websocket-client não instalado"})
+            return
         while not self._stop_event.is_set():
             try:
                 ws = websocket.create_connection(self.url, timeout=1.0); ws.settimeout(0.1); self._ws = ws; self.incoming.put({"type":"connected"})
@@ -105,7 +119,7 @@ class NativeAlphaWindow(QWidget):
         if self.mode!="chat" or self._closing:return
         text=self.input.text().strip()
         if not text:return
-        self.input.clear(); self._append_log("Você",text); payload={"action":"chat_stream","message":text};
+        self.input.clear(); self._append_log("Você",text); payload={"action":"chat_stream","message":text}
         if self.conversation_id: payload["conversation_id"]=self.conversation_id
         self.ws.send(payload)
     def _send(self,payload:dict[str,Any])->None:
@@ -147,9 +161,9 @@ class NativeAlphaWindow(QWidget):
         self.hide(); self._avatar_visible=False; self._opacity.setOpacity(1.0)
 
     def _target_screen(self):
-        app=QApplication.instance();
+        app=QApplication.instance()
         if self._screen_mode=="fixed":
-            screens=app.screens();
+            screens=app.screens()
             if 0 <= self._screen_index < len(screens): return screens[self._screen_index]
         if self._screen_mode=="primary": return app.primaryScreen()
         return app.screenAt(QCursor.pos()) or app.primaryScreen()
@@ -185,7 +199,7 @@ class NativeAlphaWindow(QWidget):
                 self.conversation_id=message.get("conversation_id") or self.conversation_id
                 if self.mode=="chat": self._set_state("idle")
             elif kind=="error":
-                self._set_state("error");
+                self._set_state("error")
                 if self.mode=="chat": self.activity.setText(str(message.get("message","erro")))
                 elif self.mode=="avatar": self._update_avatar_hud("error",str(message.get("message","erro"))[:180])
             elif kind=="connected":

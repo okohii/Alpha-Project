@@ -37,6 +37,13 @@ OBSERVE_TOOLS = frozenset(
     }
 )
 
+# Captura sensorial (tela/câmera) exige confirmação MESMO em modo read/observe:
+# capturar a área de trabalho inteira ou ativar a câmera física é um ato de
+# privacidade que não pode ser automático.
+PRIVACY_SENSITIVE_OBSERVE = frozenset(
+    {"screenshot", "verify_screen", "detect_camera"}
+)
+
 
 class ToolAction(StrEnum):
     """Tipo de ação separado para política de least privilege.
@@ -80,6 +87,8 @@ def risk_requires_confirmation(
     - write         -> depende do risco (medium/high exigem confirmação).
     """
     if permission is ToolPermission.sensitive or tool_name in EXECUTE_TOOLS:
+        return True
+    if tool_name in PRIVACY_SENSITIVE_OBSERVE:
         return True
     if permission is ToolPermission.write:
         return security_level_for(tool_name) in (SecurityLevel.medium, SecurityLevel.high)

@@ -6,6 +6,15 @@ fallback sem evidência, gate de permissões e prompt injection defense.
 """
 from __future__ import annotations
 
+
+async def _approve(candidate):
+    return True
+
+
+async def _deny(candidate):
+    return False
+
+
 import asyncio
 import json
 
@@ -261,7 +270,7 @@ async def test_tool_error_structured_and_session_survives():
     tool_failed: list[dict] = []
     bus.subscribe(EventType.tool_failed, lambda e: tool_failed.append(e.payload))
 
-    agent = _agent(provider, tools={"fail": FailingTool()}, handler=lambda _: True)
+    agent = _agent(provider, tools={"fail": FailingTool()}, handler=_approve)
     agent.event_bus = bus
 
     result = await agent.chat("tente")
@@ -488,7 +497,7 @@ async def test_write_tool_runs_with_handler():
     agent = _agent(
         provider,
         tools={"file_write": WriteTool()},
-        handler=lambda _: True,
+        handler=_approve,
     )
 
     result = await agent.chat("escreva")
@@ -507,7 +516,7 @@ async def test_sensitive_tool_confirmed_with_handler():
     agent = _agent(
         provider,
         tools={"run_code": SensitiveTool()},
-        handler=lambda _: True,
+        handler=_approve,
     )
     agent.settings.agent_auto_approve_sensitive = True
 
@@ -554,7 +563,7 @@ async def test_default_permissions_only_read_without_handler():
 async def test_default_permissions_include_write_with_handler():
     agent = _agent(
         MockLLMProvider([LLMResponse(content="ok")]),
-        handler=lambda _: True,
+        handler=_approve,
     )
     perms = agent._permissions_for_turn()
     assert ToolPermission.write in perms

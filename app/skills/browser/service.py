@@ -22,6 +22,8 @@ import httpx
 import websockets
 from websockets.protocol import State
 
+from app.core.config import get_settings
+
 logger = logging.getLogger("app.skills.browser")
 
 
@@ -84,10 +86,12 @@ class BrowserDriver:
         # Perfil dedicado: sem isso, uma instância regular do Chrome que já está
         # aberta "engole" o processo novo e a porta de debug nunca é exposta.
         profile_dir = os.path.join(tempfile.gettempdir(), "alpha_cdp_profile")
+        allowed_origin = f"http://127.0.0.1:{get_settings().overlay_port}"
         args = [
             exe,
             f"--remote-debugging-port={self.port}",
-            "--remote-allow-origins=*",
+            # CDP controlado APENAS pela origem local do ALPHA — nunca '*'.
+            f"--remote-allow-origins={allowed_origin}",
             "--no-first-run",
             "--no-default-browser-check",
             f"--user-data-dir={profile_dir}",

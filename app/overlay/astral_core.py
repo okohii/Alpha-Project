@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QUrl, Signal, Qt
+from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtQuickWidgets import QQuickWidget
 

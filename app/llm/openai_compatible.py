@@ -8,6 +8,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.llm.base import LLMMessage, LLMResponse, ToolCall
+from app.llm.trust import render_tool_result
 
 logger = logging.getLogger("app.llm.openai_compatible")
 
@@ -42,16 +43,20 @@ class OpenAICompatibleProvider:
         payload: dict[str, Any] = {"role": message.role, "content": message.content}
         if message.tool_call_id:
             payload["tool_call_id"] = message.tool_call_id
-        elif message.role == "tool" and isinstance(message.content, str):
+        if message.role == "tool":
             # O envelope JSON do tool result carrega o ``tool_call_id``; o
             # formato OpenAI exige o campo no TOPO da mensagem ``tool`` para o
             # gateway conseguir correlacionar com o assistant(tool_calls).
-            try:
-                parsed = json.loads(message.content)
-                if isinstance(parsed, dict) and parsed.get("tool_call_id"):
-                    payload["tool_call_id"] = parsed["tool_call_id"]
-            except (TypeError, ValueError):
-                pass
+            if message.tool_call_id is None and isinstance(message.content, str):
+                try:
+                    parsed = json.loads(message.content)
+                    if isinstance(parsed, dict) and parsed.get("tool_call_id"):
+                        payload["tool_call_id"] = parsed["tool_call_id"]
+                except (TypeError, ValueError):
+                    pass
+            # Contrato de confiança único: conteúdo externo não confiável é
+            # delimitado como DADO, nunca instrução (mesma proteção do Ollama).
+            payload["content"] = render_tool_result(message.content)
         if message.tool_calls:
             payload["tool_calls"] = [
                 {
@@ -89,7 +94,7 @@ class OpenAICompatibleProvider:
             try:
                 data, end = decoder.raw_decode(text)
             except json.JSONDecodeError:
-                raise exc
+                raise exc from None
             trailing = text[end:].strip()
             if trailing and trailing not in {"data: [DONE]", "[DONE]"}:
                 raise exc

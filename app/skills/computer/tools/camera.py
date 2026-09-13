@@ -6,6 +6,7 @@ dependência (ultralytics/torch/opencv) ou a câmera não estiverem disponíveis
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -115,10 +116,12 @@ class DetectCameraTool(Tool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
-            data = detect_objects(
-                source=kwargs.get("source", 0),
-                model_name=str(kwargs.get("model", "yolov8n.pt")),
-                confidence=float(kwargs.get("confidence", 0.5)),
+            # YOLO/cv2 são CPU/GPU-bound — roda fora do event loop.
+            data = await asyncio.to_thread(
+                detect_objects,
+                kwargs.get("source", 0),
+                str(kwargs.get("model", "yolov8n.pt")),
+                float(kwargs.get("confidence", 0.5)),
             )
             return ToolResult(name=self.name, success=True, data=data)
         except (RuntimeError, OSError, ValueError) as exc:

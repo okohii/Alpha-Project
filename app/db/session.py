@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -9,7 +10,16 @@ from app.db.models import Base
 
 settings = get_settings()
 engine = create_async_engine(settings.database_url, future=True, echo=False)
+# expire_on_commit=False: objetos continuam utilizáveis após commit (P47 —
+# sessão única por turno sob _turn_lock, sem detach acidental entre commits).
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+
+@asynccontextmanager
+async def session_scope():
+    """Sessão curta para operações independentes (background jobs, schedulers)."""
+    async with AsyncSessionLocal() as session:
+        yield session
 
 
 async def initialize_database() -> None:

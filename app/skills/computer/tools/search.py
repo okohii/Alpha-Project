@@ -2,12 +2,63 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from typing import Any
 
-from app.skills.computer.tools.keyboard import _get_foreground_window_title, press_sequence, type_text
+from app.skills.computer.tools.keyboard import (
+    _get_foreground_window_title,
+    press_sequence,
+    type_text,
+)
 from app.tools.base import Tool, ToolPermission, ToolResult
+
+
+def _run_search_sync(query: str, open_first: bool, wait_seconds: float) -> tuple[bool, dict[str, Any], str | None]:
+    """Executa a busca (bloqueante) fora do event loop."""
+    try:
+        # Win+S abre a Pesquisa do Windows (overlay) — primário. Em máquinas
+        # onde o atalho não responde, o fallback abre o Start isolado.
+        press_sequence("win+s")
+        time.sleep(0.45)
+        typed = type_text(query)
+        time.sleep(max(0.35, float(wait_seconds)))
+
+        if open_first:
+            press_sequence("enter")
+            time.sleep(0.8)
+
+        foreground = _get_foreground_window_title()
+        return True, {
+            "query": query,
+            "typed_chars": typed,
+            "opened_first_result": open_first,
+            "foreground": foreground,
+            "method": "start_menu_typing",
+            "note": "A consulta foi enviada ao menu Iniciar; confirme a janela/tela observada antes de afirmar o resultado.",
+        }, None
+    except (OSError, RuntimeError, ValueError):
+        # Fallback explícito para máquinas onde o atalho Win+S não respondeu.
+        try:
+            press_sequence("win")
+            time.sleep(0.5)
+            typed = type_text(query)
+            time.sleep(max(0.35, float(wait_seconds)))
+            if open_first:
+                press_sequence("enter")
+                time.sleep(0.8)
+            foreground = _get_foreground_window_title()
+            return True, {
+                "query": query,
+                "typed_chars": typed,
+                "opened_first_result": open_first,
+                "foreground": foreground,
+                "method": "win+s_fallback",
+                "note": "A consulta foi enviada via fallback Win+S; confirme a janela/tela observada antes de afirmar o resultado.",
+            }, None
+        except (OSError, RuntimeError, ValueError) as fallback_exc:
+            return False, {"query": query}, str(fallback_exc)
 
 
 class WindowsSearchTool(Tool):
@@ -16,8 +67,8 @@ class WindowsSearchTool(Tool):
         "Abre a pesquisa do Windows pelo menu Iniciar, digita uma consulta e, "
         "opcionalmente, confirma o primeiro resultado com Enter. Use para localizar "
         "aplicativos instalados, configurações ou arquivos pelo próprio Windows. "
-        "Primeiro usa a tecla Windows isoladamente (mais compatível com Windows 10/11); "
-        "Win+S fica como fallback. Não afirma que um aplicativo foi aberto sem evidência."
+        "Abre a Pesquisa (Win+S) e, como fallback, o menu Iniciar isolado. "
+        "Não afirma que um aplicativo foi aberto sem evidência."
     )
     permission = ToolPermission.write
 
@@ -38,65 +89,20 @@ class WindowsSearchTool(Tool):
                 error="A pesquisa pelo menu Iniciar só é suportada no Windows.",
             )
 
-        try:
-            # Em Windows 10/11, abrir o Start e começar a digitar é mais robusto
-            # que depender do atalho Win+S, especialmente quando SearchHost está
-            # sendo inicializado ou alguma política altera o comportamento do atalho.
-            press_sequence("win")
-            time.sleep(0.45)
-            typed = type_text(query)
-            time.sleep(max(0.35, float(kwargs.get("wait_seconds", 0.8))))
-
-            enter = bool(kwargs.get("open_first", True))
-            if enter:
-                press_sequence("enter")
-                time.sleep(0.8)
-
-            foreground = _get_foreground_window_title()
+        open_first = bool(kwargs.get("open_first", True))
+        wait_seconds = float(kwargs.get("wait_seconds", 0.8))
+        # Ações de teclado + waits bloqueantes saem do event loop (P-3).
+        ok, data, error = await asyncio.to_thread(
+            _run_search_sync, query, open_first, wait_seconds
+        )
+        if not ok:
             return ToolResult(
                 name=self.name,
-                success=True,
-                data={
-                    "query": query,
-                    "typed_chars": typed,
-                    "opened_first_result": enter,
-                    "foreground": foreground,
-                    "method": "start_menu_typing",
-                    "note": "A consulta foi enviada ao menu Iniciar; confirme a janela/tela observada antes de afirmar o resultado.",
-                },
+                success=False,
+                data={"query": query},
+                error=f"Não consegui abrir a pesquisa do Windows: {error}",
             )
-        except (OSError, RuntimeError, ValueError) as exc:
-            # Fallback explícito para máquinas onde a tecla Windows isolada não
-            # abriu o Start corretamente.
-            try:
-                press_sequence("win+s")
-                time.sleep(0.5)
-                typed = type_text(query)
-                time.sleep(max(0.35, float(kwargs.get("wait_seconds", 0.8))))
-                enter = bool(kwargs.get("open_first", True))
-                if enter:
-                    press_sequence("enter")
-                    time.sleep(0.8)
-                foreground = _get_foreground_window_title()
-                return ToolResult(
-                    name=self.name,
-                    success=True,
-                    data={
-                        "query": query,
-                        "typed_chars": typed,
-                        "opened_first_result": enter,
-                        "foreground": foreground,
-                        "method": "win+s_fallback",
-                        "note": "A consulta foi enviada via fallback Win+S; confirme a janela/tela observada antes de afirmar o resultado.",
-                    },
-                )
-            except (OSError, RuntimeError, ValueError) as fallback_exc:
-                return ToolResult(
-                    name=self.name,
-                    success=False,
-                    data={"query": query},
-                    error=f"Não consegui abrir a pesquisa do Windows: {fallback_exc}",
-                )
+        return ToolResult(name=self.name, success=True, data=data)
 
     def parameters_schema(self) -> dict[str, Any]:
         return {

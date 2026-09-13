@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from app.security import AccessDeniedError
@@ -23,7 +24,7 @@ class FileSearchTool(Tool):
         try:
             query = str(kwargs.get("query", ""))
             path = str(kwargs.get("path", "."))
-            results = self.file_manager.search_files(query=query, path=path)
+            results = await asyncio.to_thread(self.file_manager.search_files, query, path)
             return ToolResult(name=self.name, success=True, data={"results": results})
         except (AccessDeniedError, OSError) as exc:
             return ToolResult(name=self.name, success=False, data={}, error=exc)

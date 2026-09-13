@@ -8,6 +8,7 @@ from typing import Any
 
 from app.db.models import SystemEventRecord
 from app.reminders.service import SAFE_ACTIONS, ReminderRepository, ReminderService
+from app.security.capabilities import is_auto_approvable
 from app.skills.files.service import FileManager
 from app.tasks.service import ManagedPathRepository, TaskExecutorService, TaskRepository
 from app.tools.registry import build_default_tool_registry
@@ -37,6 +38,9 @@ class RegistryActionRunner:
             return {"message": message, "notified": True}
         if action not in SAFE_ACTIONS:
             raise ValueError(f"Ação não permitida no agendador: {action}")
+        if not is_auto_approvable(action):
+            logger.warning("[reminders] ação %s requer confirmação; execução agendada negada (fail-closed)", action)
+            return {"error": "execução agendada negada: ação requer confirmação", "action": action}
         registry = await self._registry_for_session()
         result = await registry.execute(action, **params)
         if not result.success:

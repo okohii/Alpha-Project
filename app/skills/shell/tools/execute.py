@@ -11,10 +11,10 @@ from app.tools.base import Tool, ToolPermission, ToolResult
 class RunCodeTool(Tool):
     name = "run_code"
     description = (
-        "Executa código Python isolado no computador do usuário e devolve a saída "
-        "(stdout/stderr, código de saída e tempo). Use para cálculos, scripts rápidos, "
-        "processamento de arquivos, automação ou testes de lógica. O código roda no "
-        "diretório de trabalho permitido; rede não é garantida nem bloqueada."
+        "Executa código Python ARBITRÁRIO com os privilégios do usuário e devolve a "
+        "saída (stdout/stderr, código de saída e tempo). NÃO é sandbox de segurança: "
+        "o código tem acesso a arquivos, rede e variáveis de ambiente, e pode invocar "
+        "subprocessos. Requer confirmação explícita por chamada (EXECUTE_CODE)."
     )
     permission = ToolPermission.sensitive
 

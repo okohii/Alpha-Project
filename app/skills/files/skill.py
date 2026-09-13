@@ -14,7 +14,6 @@ SKILL = Skill(
         "file_read",
         "file_write",
         "file_info",
-        "open_file",
     ],
 )
 

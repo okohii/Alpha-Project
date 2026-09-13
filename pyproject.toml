@@ -62,3 +62,18 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+# Estilo denso do projeto (múltiplas sentenças por linha e linhas longas) não
+# é convertido mecanicamente aqui; a lint foca em CORRETUDE (F/B/UP/I e E4xx).
+ignore = ["E501", "E701", "E702", "E402", "E703"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI depende de chamadas em defaults (Depends/File/Header...) — padrão oficial.
+extend-immutable-calls = [
+  "fastapi.Depends",
+  "fastapi.File",
+  "fastapi.Body",
+  "fastapi.Query",
+  "fastapi.Header",
+  "fastapi.Path",
+  "fastapi.Cookie",
+]

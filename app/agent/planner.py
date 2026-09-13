@@ -1,15 +1,8 @@
 from __future__ import annotations
 
 from app.assistant.intent import Goal
-from app.execution.models import Plan, PlanStep
+from app.execution.models import STRICT_VERIFICATION_TOOLS, Plan, PlanStep
 from app.security.permissions import SecurityLevel
-
-_STRICT_TOOLS = frozenset({
-    "browser_click", "browser_js", "browser_open", "browser_navigate",
-    "open_app", "open_url", "open_file", "close_app", "move_app",
-    "mouse_click", "mouse_scroll", "type_text", "press_key", "click_text",
-    "run_shell", "run_code", "task_execute", "procedure_run", "macro_run",
-})
 
 
 class Planner:
@@ -24,7 +17,7 @@ class Planner:
         steps: list[PlanStep] = []
         for i, task in enumerate(goal.tasks):
             step_id = f"step-{goal.id or 'goal'}-{i}"
-            if task.tool_hint in _STRICT_TOOLS:
+            if task.tool_hint in STRICT_VERIFICATION_TOOLS:
                 expected = [
                     "pós-condição observada e confirmada",
                     f"{task.tool_hint} executado com sucesso",

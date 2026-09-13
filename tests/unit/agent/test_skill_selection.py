@@ -5,6 +5,15 @@ permissões ANTES de expor a tool -> Agent execution.
 """
 from __future__ import annotations
 
+
+async def _approve(candidate):
+    return True
+
+
+async def _deny(candidate):
+    return False
+
+
 from dataclasses import dataclass
 
 import pytest
@@ -96,21 +105,23 @@ def _schema_names(agent: AgentCore, task: str) -> set[str]:
 
 def test_skill_selection_browser_web_compound():
     """'Abra o YouTube e procure vídeos.' -> Browser + Web apenas."""
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     names = _names(agent, "Abra o YouTube e procure vídeos de Python.")
 
-    assert {"browser_open", "browser_text", "web_search", "open_url"} <= names
+    assert {"browser_open", "browser_text", "web_search"} <= names
     # skills não relacionadas NÃO são selecionadas
     assert "file_write" not in names
     assert "run_code" not in names
     assert "run_shell" not in names
     assert "calendar_list" not in names
     assert "macro_run" not in names
+    # owner único: open_url pertence à skill Computer, não ao Browser
+    assert "open_url" not in names
 
 
 def test_skill_selection_files_only():
     """'Liste os arquivos da pasta Downloads.' -> Files apenas."""
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     names = _names(agent, "Liste os arquivos da minha pasta Downloads.")
 
     assert {"file_search", "file_read", "file_info"} <= names
@@ -140,11 +151,12 @@ def test_permissions_filter_before_exposure_read_only():
 
 def test_permissions_allow_write_with_handler():
     """Com handler, write das skills selecionadas é exposto."""
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     names = _names(agent, "Abra o YouTube e procure vídeos de Python.")
 
     assert "browser_open" in names  # write, skill selecionada
-    assert "open_url" in names
+    # open_url pertence ao Computer (owner único), não é exposto no caso browser.
+    assert "open_url" not in names
     # sensíveis de skills NÃO selecionadas continuam fora
     assert "run_code" not in names
     assert "macro_run" not in names
@@ -154,7 +166,7 @@ def test_permissions_allow_write_with_handler():
 
 def test_sensitive_tool_exposed_from_selected_skill_with_handler():
     """Sensível da skill selecionada é exposto quando há caminho de confirmação."""
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     skills = agent.skill_registry.select_skills_for_task("escrever um arquivo qualquer")
     assert {s.name for s in skills} == {"Files"}
 
@@ -174,7 +186,7 @@ def test_sensitive_tool_not_exposed_without_handler():
 
 def test_no_skill_fallback_is_safe_subset():
     """Tarefa genérica: fallback seguro (FALLBACK_TOOLS ∪ CORE), sem sensíveis."""
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     names = _names(agent, "conte uma piada divertida sobre programação")
 
     assert names
@@ -189,7 +201,7 @@ def test_no_skill_fallback_is_safe_subset():
 
 def test_low_confidence_weak_tie_falls_back():
     """Empate fraco de keywords -> fallback, não expõe skill ambígua."""
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     names = _names(agent, "preciso encontrar um documento")
 
     assert names <= (FALLBACK_TOOLS | CORE_TOOLS)
@@ -200,7 +212,7 @@ def test_low_confidence_weak_tie_falls_back():
 
 def test_schemas_gate_excludes_non_advertised_permissions():
     """Schemas nunca expõem tool fora da autorização anunciada do turno."""
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     schema_names = _schema_names(agent, "Abra o YouTube e procure vídeos de Python.")
 
     assert "browser_open" in schema_names  # write com handler -> anunciado
@@ -250,7 +262,7 @@ async def test_selection_does_not_add_llm_calls():
 
 def test_skill_selection_macros_only():
     """'Quais macros estão configuradas?' -> Macros apenas."""
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     skills = agent.skill_registry.select_skills_for_task("quais macros estão configuradas?")
     assert [s.name for s in skills] == ["Macros"]
     names = _names(agent, "quais macros estão configuradas?")
@@ -262,7 +274,7 @@ def test_skill_selection_macros_only():
 
 def test_skill_selection_memory_reminders_compound():
     """'lembrar de comprar pão amanhã às 10' -> Memory + Reminders."""
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     skills = agent.skill_registry.select_skills_for_task("lembrar de comprar pão amanhã às 10")
     assert {s.name for s in skills} == {"Memory", "Reminders"}
 
@@ -272,7 +284,7 @@ async def test_unknown_tool_call_rejected():
     """Modelo chama tool inexistente → mensagem de erro com alternativas."""
     from app.llm.base import ToolCall as RealToolCall
 
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     permissions = agent._permissions_for_turn()
     allowed = {"time", "file_read", "file_search"}
     tool_call = RealToolCall(name="nope_tool", arguments={"q": 1})
@@ -286,7 +298,7 @@ async def test_unknown_tool_call_rejected():
 
 def test_schemas_for_only_returns_advertised():
     """_schemas_for never returns tools outside the provided name set."""
-    agent = _agent(_tools(), handler=lambda _: True)
+    agent = _agent(_tools(), handler=_approve)
     all_names = {"browser_open", "browser_text", "browser_js"}
     schemas = agent._schemas_for(all_names, agent._permissions_for_turn())
     names_in_schemas = {s["function"]["name"] for s in schemas}

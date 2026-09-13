@@ -8,6 +8,33 @@ from enum import StrEnum
 from app.assistant.intent import Goal
 from app.security.permissions import SecurityLevel
 
+# Fonte ÚNICA das ferramentas que exigem verificação pós-ação (Fase 5.2).
+# Usada pelo Planner (evidência esperada), SerializedAgentCore e
+# ReliableAgentCore (gate de verificação). Não duplicar em outros módulos.
+STRICT_VERIFICATION_TOOLS = frozenset(
+    {
+        "browser_click",
+        "browser_js",
+        "browser_open",
+        "browser_navigate",
+        "open_app",
+        "open_url",
+        "open_file",
+        "close_app",
+        "move_app",
+        "mouse_click",
+        "mouse_scroll",
+        "type_text",
+        "press_key",
+        "click_text",
+        "run_shell",
+        "run_code",
+        "task_execute",
+        "procedure_run",
+        "macro_run",
+    }
+)
+
 
 class PlanStatus(StrEnum):
     pending = "pending"
@@ -49,6 +76,7 @@ class PlanStep:
     expected_evidence: list[str] = field(default_factory=list)
     attempts: int = 0
     retryable: bool = False
+    last_failure_class: str = ""
 
 
 @dataclass(slots=True)

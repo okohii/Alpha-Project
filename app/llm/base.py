@@ -30,6 +30,7 @@ class ExecutionEvidence:
 
     Permite distinguir o que foi *observado* (success/result reais) de
     suposições do modelo ou memória. Todo turno de ferramenta produz uma.
+    ``session_id`` vincula a evidência à sessão/conversa (telemetria).
     """
 
     action_id: str
@@ -41,6 +42,8 @@ class ExecutionEvidence:
     error: str | None = None
     verified: bool = False
     status: str | None = None
+    session_id: str = ""
+    conversation_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.status:

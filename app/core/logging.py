@@ -6,7 +6,6 @@ from typing import Any
 
 from app.core.config import get_settings
 
-
 CATEGORIES = frozenset(
     {
         "action",
@@ -124,12 +123,59 @@ def configure_logging() -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.addFilter(CategoryFilter())
     handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s %(levelname)s [%(alpha_category)s] %(name)s %(message)s"
-        )
+        _formatter_for(str(getattr(settings, "log_format", "")).lower())
     )
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         handlers=[handler],
         force=True,
+    )
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Aplica redação de segredos ao texto final do log (Fase 6.4)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        try:
+            from app.security.redact import redact_text
+
+            return redact_text(rendered)
+        except Exception:  # pragma: no cover - redação nunca derruba o log
+            return rendered
+
+
+class _JsonFormatter(logging.Formatter):
+    """Uma linha JSON por registro (LOG_FORMAT=json)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        try:
+            import json
+
+            payload = {
+                "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+                "level": record.levelname,
+                "category": getattr(record, "alpha_category", "system"),
+                "logger": record.name,
+                "message": record.getMessage(),
+            }
+            if record.exc_info:
+                payload["exc"] = self.formatException(record.exc_info)
+            from app.security.redact import redact_text
+
+            payload["message"] = redact_text(str(payload["message"]))
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception:  # pragma: no cover - JSON nunca derruba o log
+            return super().format(record)
+
+
+def _formatter_for(log_format: str) -> logging.Formatter:
+    if log_format == "json":
+        return _JsonFormatter()
+    if log_format == "plain":
+        return _RedactingFormatter(
+            "%(asctime)s %(levelname)s [%(alpha_category)s] %(name)s %(message)s"
+        )
+    return _RedactingFormatter(
+        "%(asctime)s %(levelname)s [%(alpha_category)s] %(name)s %(message)s"
     )

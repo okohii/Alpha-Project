@@ -5,17 +5,45 @@ from typing import Any
 
 from app.memory.service import MemoryService
 from app.perception.vision import OllamaVisionProvider, get_vision_verifier
-from app.skills.browser import BrowserClickTool, BrowserHtmlTool, BrowserJsTool, BrowserOpenTool, BrowserScreenshotTool, BrowserTextTool, BrowserWaitTool
+from app.skills.browser import (
+    BrowserClickTool,
+    BrowserHtmlTool,
+    BrowserJsTool,
+    BrowserOpenTool,
+    BrowserScreenshotTool,
+    BrowserTextTool,
+    BrowserWaitTool,
+)
 from app.skills.calendar import CalendarCreateTool, CalendarDeleteTool, CalendarListTool
 from app.skills.computer import (
-    ApplicationLauncher, ClickTextTool, CloseAppTool, DetectCameraTool, ListAppsTool,
-    ListMonitorsTool, MouseClickTool, MouseScrollTool, MoveAppTool, OpenAppTool,
-    OpenFileTool, OpenUrlTool, PressKeyTool, ReadUiTool, ScreenshotTool, TypeTextTool,
-    VerifyScreenTool, WindowsSearchTool,
+    ApplicationLauncher,
+    ClickTextTool,
+    CloseAppTool,
+    DetectCameraTool,
+    ListAppsTool,
+    ListMonitorsTool,
+    MouseClickTool,
+    MouseScrollTool,
+    MoveAppTool,
+    OpenAppTool,
+    OpenFileTool,
+    OpenUrlTool,
+    PressKeyTool,
+    ReadUiTool,
+    ScreenshotTool,
+    TypeTextTool,
+    VerifyScreenTool,
+    WindowsSearchTool,
 )
 from app.skills.documents import DocumentSearchTool
 from app.skills.files import FileInfoTool, FileManager, FileReadTool, FileSearchTool, FileWriteTool
-from app.skills.memory import MemoryDeleteTool, MemorySaveTool, MemorySearchTool, ProcedureRunTool, ProcedureSaveTool
+from app.skills.memory import (
+    MemoryDeleteTool,
+    MemorySaveTool,
+    MemorySearchTool,
+    ProcedureRunTool,
+    ProcedureSaveTool,
+)
 from app.skills.reminders import ReminderCreateTool, ReminderDeleteTool, ReminderListTool
 from app.skills.shell import RunCodeTool, RunShellTool
 from app.skills.system import SystemConfigTool, SystemInfoTool, TimeTool
@@ -28,6 +56,15 @@ from app.tools.errors import ToolNotFoundError
 @dataclass(slots=True)
 class ToolRegistry:
     tools: dict[str, Tool]
+
+    def __post_init__(self) -> None:
+        # Duplicidade de nome nunca é aceita silenciosamente (o sobrewriter
+        # perde side effects — ex.: tool com serviço injetado).
+        seen: set[str] = set()
+        for name in self.tools:
+            if name in seen:
+                raise ValueError(f"tool duplicada no registry: {name}")
+            seen.add(name)
 
     def list(self, permissions: set[ToolPermission] | None = None) -> list[Tool]:
         if permissions is None:
@@ -92,7 +129,16 @@ def build_default_tool_registry(
         tools["document_search"] = DocumentSearchTool(document_indexer_factory)
 
     try:
-        from app.macros.tools import MacroCreateTool, MacroDeleteTool, MacroListTool, MacroRunTool, MacroSchedulesDeleteTool, MacroSchedulesEditTool, MacroSchedulesTool, MacroScheduleTool
+        from app.macros.tools import (
+            MacroCreateTool,
+            MacroDeleteTool,
+            MacroListTool,
+            MacroRunTool,
+            MacroSchedulesDeleteTool,
+            MacroSchedulesEditTool,
+            MacroSchedulesTool,
+            MacroScheduleTool,
+        )
         for cls in (MacroListTool, MacroRunTool, MacroCreateTool, MacroDeleteTool, MacroScheduleTool, MacroSchedulesTool, MacroSchedulesEditTool, MacroSchedulesDeleteTool):
             tools.setdefault(cls.name, cls())
     except ImportError:

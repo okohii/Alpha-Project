@@ -36,6 +36,21 @@ from app.tools.base import ToolResult
 
 logger = logging.getLogger(__name__)
 
+# Passos de macro seguros para EXECUÇÃO AGENDADA sem confirmação interativa.
+# Tudo o que altera estado (teclado, mouse, apps, rede, clipboard) fora de uma
+# sessão interativa é rejeitado fail-closed (Parte 16): agendamento não pode
+# virar bypass do Permission Gate.
+SCHEDULED_SAFE_STEPS = {"message", "wait", "screenshot", "verify_screen"}
+
+
+def macro_requires_confirmation(steps: list[Any]) -> bool:
+    """True se a macro possui passos que exigem confirmação por chamada."""
+    for step in steps:
+        step_type = getattr(step, "step_type", None) or (step or {}).get("step_type", "")
+        if str(step_type) not in SCHEDULED_SAFE_STEPS:
+            return True
+    return False
+
 
 class MacroRecorder:
     """Grava uma sequência de ações via UI Automation."""
@@ -307,7 +322,8 @@ class MacroExecutor:
                 msg = "UI Automation indisponível"
                 return ToolResult(name="click", success=False, data={}, error=msg)
             try:
-                result = uia_click_text(text, window_hint=window_hint)
+                # UIA é síncrono/bloqueante — roda fora do event loop (to_thread).
+                result = await asyncio.to_thread(uia_click_text, text, window_hint=window_hint)
                 return ToolResult(name="click", success=True, data=result)
             except UiaError as exc:
                 # Se UIA falhou e tem coordenadas, fallback
@@ -321,7 +337,10 @@ class MacroExecutor:
         return ToolResult(name="click", success=False, data={}, error=msg)
 
     async def _click_at_coordinates(self, x: int, y: int) -> ToolResult:
-        """Clica nas coordenadas (x, y) usando pyautogui."""
+        """Clica nas coordenadas (x, y) usando pyautogui (off the event loop)."""
+        return await asyncio.to_thread(self._click_coordinates_sync, x, y)
+
+    def _click_coordinates_sync(self, x: int, y: int) -> ToolResult:
         try:
             import pyautogui
 
@@ -339,23 +358,22 @@ class MacroExecutor:
     async def _type_text_with_fallback(
         self, text: str, app: str | None
     ) -> ToolResult:
-        """Digita texto usando keyboard press/release direto."""
+        """Digita texto usando keyboard/clipboard (off the event loop)."""
         await asyncio.sleep(0.1)
+        return await asyncio.to_thread(self._type_text_sync, text)
 
+    def _type_text_sync(self, text: str) -> ToolResult:
+        if not text:
+            return ToolResult(
+                name="type_text", success=False, data={}, error="Texto vazio para digitar."
+            )
         try:
             import keyboard as kb
             import pyperclip
 
-            # Salva clipboard atual
             old_clip = pyperclip.paste()
-
-            # Copia o texto para o clipboard
             pyperclip.copy(text)
-
-            # cola com Ctrl+V
             kb.press_and_release("ctrl+v")
-
-            # Restaura clipboard após 0.5s
             import time
             time.sleep(0.5)
             pyperclip.copy(old_clip)
@@ -365,7 +383,6 @@ class MacroExecutor:
                 data={"typed_chars": len(text), "text": text, "method": "clipboard"},
             )
         except Exception:
-            # Fallback: pressiona teclas uma por uma
             try:
                 import keyboard as kb
                 for char in text:
@@ -393,7 +410,7 @@ class MacroExecutor:
             text = str(params["text"])
             while asyncio.get_event_loop().time() < deadline:
                 try:
-                    elements = uia_read_ui_text()
+                    elements = await asyncio.to_thread(uia_read_ui_text)
                     for el in elements:
                         if text.lower() in el.get("name", "").lower():
                             return ToolResult(name="wait", success=True, data={"found": text})
@@ -674,6 +691,15 @@ class MacroService:
                 return
             macro = await session.get(MacroRecord, schedule.macro_id)
             if not macro or not macro.enabled:
+                return
+            # Parte 16: execução agendada reavalia segurança — passos que
+            # exigem confirmação são recusados (nunca herdam autorização
+            # interativa).
+            if macro_requires_confirmation(macro.steps):
+                logger.warning(
+                    "[security] macro agendada %s recusada: passos exigem confirmação (fail-closed)",
+                    macro.name,
+                )
                 return
 
             parameters = {**schedule.fixed_parameters}

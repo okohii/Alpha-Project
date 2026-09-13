@@ -90,9 +90,7 @@ async def build_agent(
         for tool_class in (TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool):
             tool_registry.tools.setdefault(tool_class.name, tool_class(task_service))
 
-    skill_registry = build_default_skill_registry(
-        tools_in_registry=tool_registry.tools if hasattr(tool_registry, "tools") else None
-    )
+    skill_registry = build_default_skill_registry()
     missing_tools = skill_registry.validate_tools(
         tool_registry.tools if hasattr(tool_registry, "tools") else {}
     )
@@ -112,11 +110,15 @@ async def build_agent(
             return False
         if is_action_confirmation:
             return True
+        # H7/Parte 19: confirmação de UM caminho não vira permissão permanente.
+        # O grant fica APENAS em memória (escopo da sessão do agente), nunca é
+        # persistido no banco como allowlist global.
         normalized = Path(candidate).expanduser().resolve()
         if normalized not in file_manager.allowed_directories:
             file_manager.allowed_directories.append(normalized)
-        await task_service.register_allowed_path(
-            path=str(normalized), entry_type="directory", source="permission_request"
+        logger.info(
+            "[security] path_grant scope=session path=%s persistence=memory",
+            normalized,
         )
         return True
 

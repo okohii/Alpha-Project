@@ -99,6 +99,10 @@ class FakeDocumentIndexer:
         return {"indexed": [{"path": "/allowed/test.py", "hash": "abc", "chunks": []}]}
 
 
+async def _async_none() -> list:
+    return []
+
+
 @pytest.mark.anyio
 async def test_health_and_settings_endpoints(monkeypatch):
     monkeypatch.setattr(
@@ -140,8 +144,12 @@ async def test_settings_reads_allowed_directories_from_db(monkeypatch):
 
 @pytest.mark.anyio
 async def test_chat_memory_and_documents_endpoints(monkeypatch):
-    monkeypatch.setattr("app.runtime.application.AgentCore", FakeAgent)
-    monkeypatch.setattr("app.runtime.application.MemoryRepository", lambda session: object())
+    monkeypatch.setattr("app.runtime.application.ReliableAgentCore", FakeAgent)
+    class _Tok:
+        local_api_token = "alpha-test-token"
+
+    monkeypatch.setattr("app.security.api_gate.get_settings", lambda: _Tok)
+    monkeypatch.setattr("app.runtime.application.SqliteMemoryRepository", lambda session: object())
     monkeypatch.setattr("app.runtime.application.MemoryService", FakeMemoryService)
     monkeypatch.setattr(
         "app.runtime.application.build_default_tool_registry",
@@ -151,26 +159,33 @@ async def test_chat_memory_and_documents_endpoints(monkeypatch):
     monkeypatch.setattr("app.api.routes_documents.DocumentRepository", lambda session: object())
     monkeypatch.setattr(
         "app.api.routes_documents.ManagedPathRepository",
-        lambda session: type("R", (), {"list": lambda self: []})(),
+        lambda session: type(
+            "R",
+            (),
+            {"list": lambda self: _async_none()},
+        )(),
     )
     monkeypatch.setattr(
         "app.api.routes_documents.FileManager",
         (lambda: type("FM", (), {"allowed_directories": []})()),
     )
-    monkeypatch.setattr("app.api.routes_memory.MemoryRepository", lambda session: object())
+    monkeypatch.setattr("app.api.routes_memory.SqliteMemoryRepository", lambda session: object())
     monkeypatch.setattr("app.api.routes_memory.MemoryService", FakeMemoryService)
     monkeypatch.setattr("app.api.routes_conversations.Conversation", FakeConversation)
     monkeypatch.setattr("app.api.routes_conversations.select", lambda *args, **kwargs: FakeQuery())
     monkeypatch.setattr("app.api.routes_conversations.get_session", lambda: FakeSession())
 
+    headers = {"Authorization": "Bearer alpha-test-token"}
     transport = ASGITransport(app=app_main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        chat = await client.post("/chat", json={"message": "Olá ALPHA."})
+        chat = await client.post("/chat", json={"message": "Olá ALPHA."}, headers=headers)
         memories = await client.post(
             "/memories",
             json={"content": "Meu projeto se chama Atlas.", "importance": 1.0},
         )
-        documents = await client.post("/documents/index")
+        documents = await client.post(
+            "/documents/index", headers={"Authorization": "Bearer alpha-test-token"}
+        )
         conversations = await client.get("/conversations")
 
     assert chat.status_code == 200
@@ -178,3 +193,17 @@ async def test_chat_memory_and_documents_endpoints(monkeypatch):
     assert memories.status_code == 200
     assert documents.status_code == 200
     assert conversations.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_chat_requires_local_token(monkeypatch):
+    class _Tok:
+        local_api_token = "alpha-test-token"
+
+    monkeypatch.setattr("app.security.api_gate.get_settings", lambda: _Tok)
+
+    transport = ASGITransport(app=app_main.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/chat", json={"message": "Olá ALPHA."})
+
+    assert response.status_code == 403

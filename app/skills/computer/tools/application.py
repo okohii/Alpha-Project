@@ -1,6 +1,7 @@
 # ruff: noqa: E501 - descrições de ferramentas de aplicativos
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -32,7 +33,7 @@ class OpenFileTool(Tool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             path = str(kwargs.get("path", ""))
-            result = self.file_manager.open_with_default_app(path)
+            result = await asyncio.to_thread(self.file_manager.open_with_default_app, path)
             return ToolResult(name=self.name, success=True, data=result)
         except (AccessDeniedError, OSError, ValueError) as exc:
             return ToolResult(name=self.name, success=False, data={}, error=exc)
@@ -69,23 +70,35 @@ class OpenAppTool(Tool):
         try:
             app = str(kwargs.get("app", ""))
             url = _normalize_url(str(kwargs.get("url", "") or ""))
+            # SSRF hardening: url explícita de open_app também respeita a política.
+            if url:
+                from app.security.urlpolicy import UnsafeUrlError, coerce_safe_url
+
+                try:
+                    url = coerce_safe_url(url)
+                except UnsafeUrlError as exc:
+                    return ToolResult(
+                        name=self.name, success=False, data={}, error=f"destino bloqueado: {exc}"
+                    )
             monitor = kwargs.get("monitor")
             if monitor is not None:
                 monitor = int(monitor)
                 if monitor <= 0:
                     raise ValueError("Monitor deve ser um número a partir de 1 (veja list_monitors).")
-                info = self.launcher.resolve(app)
-                result = launch_on_monitor(info["path"], monitor, args=[url] if url else None)
+                info = await asyncio.to_thread(self.launcher.resolve, app)
+                result = await asyncio.to_thread(
+                    launch_on_monitor, info["path"], monitor, ([url] if url else None)
+                )
                 return ToolResult(name=self.name, success=True, data=result)
             args = [url] if url else None
             try:
-                result = self.launcher.launch(app, args=args)
+                result = await asyncio.to_thread(self.launcher.launch, app, args=args)
             except ValueError:
                 site_url = SITE_URLS.get(_norm(app))
                 if not site_url:
                     raise
                 target = url or site_url
-                executable = _open_url_default(target)
+                executable = await asyncio.to_thread(_open_url_default, target)
                 return ToolResult(
                     name=self.name,
                     success=True,
@@ -160,6 +173,15 @@ class OpenUrlTool(Tool):
             return ToolResult(
                 name=self.name, success=False, data={}, error="Informe a URL a abrir."
             )
+        # SSRF hardening (Parte 7/39): schemes/hosts proibidos são recusados.
+        from app.security.urlpolicy import UnsafeUrlError, coerce_safe_url
+
+        try:
+            url = coerce_safe_url(url)
+        except UnsafeUrlError as exc:
+            return ToolResult(
+                name=self.name, success=False, data={}, error=f"destino bloqueado: {exc}"
+            )
         requested = str(kwargs.get("browser", "") or "").strip()
         try:
             browser = requested
@@ -173,14 +195,14 @@ class OpenUrlTool(Tool):
                     name=self.name, success=True, data={"url": url, "deduped": True}
                 )
             if browser:
-                result = self.launcher.launch(browser, args=[url])
+                result = await asyncio.to_thread(self.launcher.launch, browser, args=[url])
                 data = {
                     "url": url,
                     "browser": result.get("app", browser),
                     "method": "browser",
                 }
             else:
-                executable = _open_url_default(url)
+                executable = await asyncio.to_thread(_open_url_default, url)
                 data = {
                     "url": url,
                     "browser": "default",
@@ -219,7 +241,7 @@ class ListAppsTool(Tool):
         self.launcher = launcher
 
     async def execute(self, **kwargs: Any) -> ToolResult:
-        installed = [app.to_dict() for app in self.launcher.installed.discover()]
+        installed = await asyncio.to_thread(self.launcher.installed.discover)
         limit = int(kwargs.get("limit", 100))
         return ToolResult(
             name=self.name,
@@ -227,7 +249,7 @@ class ListAppsTool(Tool):
             data={
                 "total_installed": len(installed),
                 "known_catalog": [entry.key for entry in self.launcher.catalog],
-                "apps": installed[:limit],
+                "apps": [app.to_dict() for app in installed[:limit]],
                 "truncated": len(installed) > limit,
             },
         )

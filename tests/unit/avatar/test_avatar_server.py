@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
@@ -130,7 +131,30 @@ def test_avatar_integration_state_set_via_events():
 
 def test_avatar_ws_ping_pong():
     client = TestClient(app)
-    with client.websocket_connect("/avatar/ws") as ws:
+    with client.websocket_connect(
+        "/avatar/ws", headers={"origin": "http://127.0.0.1:18081"}
+    ) as ws:
         ws.send_json({"action": "ping"})
         message = ws.receive_json()
         assert message["type"] == "pong"
+
+
+def test_avatar_ws_rejects_foreign_origin():
+    from starlette.websockets import WebSocketDisconnect
+
+    client = TestClient(app)
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/avatar/ws", headers={"origin": "http://evil.example.com"}
+        ):
+            pass
+
+
+def test_avatar_ws_rejects_non_local_origin():
+    # Origin default do TestClient é http://testserver (host estranho).
+    from starlette.websockets import WebSocketDisconnect
+
+    client = TestClient(app)
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/avatar/ws"):
+            pass

@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
+from app.core.bounded import put_dropping_oldest
 from app.core.events import EventBus, EventType, SystemEvent
 from app.db.session import AsyncSessionLocal
 from app.overlay.state import (
@@ -20,7 +21,7 @@ from app.overlay.state import (
     state_for_event,
 )
 from app.runtime import build_agent
-from app.security import SENSITIVE_PREFIX
+from app.security.wsauth import validate_websocket_connection, ws_client_host
 from app.speech.pipeline import VoicePipeline
 
 router = APIRouter(prefix="/overlay", tags=["overlay"])
@@ -98,15 +99,9 @@ def _text_payload(event: SystemEvent) -> dict[str, Any]:
 
 def _parse_confirmation_candidate(candidate: str) -> dict[str, str]:
     """Extrai tool + argumentos legíveis de um candidate de confirmação."""
-    if candidate.startswith(SENSITIVE_PREFIX):
-        rest = candidate[len(SENSITIVE_PREFIX) :]
-        tool_name, sep, args = rest.partition(": ")
-        return {
-            "kind": "action",
-            "tool": tool_name.strip() if sep else rest.strip(),
-            "arguments": args.strip() if sep else "",
-        }
-    return {"kind": "path", "tool": "permissão de acesso", "arguments": candidate}
+    from app.core.presentation import parse_confirmation_candidate as _parse
+
+    return _parse(candidate)
 
 
 class _OverlaySession:
@@ -122,11 +117,14 @@ class _OverlaySession:
         self.event_bus = EventBus()
         self.cancel_event = asyncio.Event()
         self._confirm_queue: asyncio.Queue[bool] = asyncio.Queue()
-        self._event_queue: asyncio.Queue[SystemEvent] = asyncio.Queue()
+        self._event_queue: asyncio.Queue[SystemEvent] = asyncio.Queue(maxsize=2000)
         self._unsubscribe: Any | None = None
         self.conversation_id: str | None = None
         self.chat_task: asyncio.Task[Any] | None = None
         self.state = OverlayState.IDLE
+
+    def _event_dropped(self) -> None:
+        logger.warning("[overlay] fila de eventos cheia: descartou eventos antigos")
 
     async def send(self, payload: dict[str, Any]) -> None:
         try:
@@ -136,8 +134,8 @@ class _OverlaySession:
 
     def _forward_event(self, event: SystemEvent) -> None:
         try:
-            self._event_queue.put_nowait(event)
-        except Exception:  # noqa: BLE001 - fila unbounded nunca enche
+            put_dropping_oldest(self._event_queue, event, on_drop=self._event_dropped)
+        except Exception:  # noqa: BLE001 - emissor nunca quebra por fila cheia
             pass
 
     async def _pump_events(self) -> None:
@@ -235,6 +233,15 @@ async def _handle_voice(overlay: _OverlaySession, raw: dict[str, Any]) -> None:
 
 @router.websocket("/ws")
 async def overlay_ws(websocket: WebSocket) -> None:
+    origin = websocket.headers.get("origin")
+    client_host = ws_client_host(websocket)
+    ok, reason = validate_websocket_connection(origin, client_host)
+    if not ok:
+        logger.warning(
+            "[overlay] ws rejeitado origin=%r host=%r motivo=%s", origin, client_host, reason
+        )
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     logger.debug("[OVERLAY] backend connected")
     overlay = _OverlaySession(websocket)

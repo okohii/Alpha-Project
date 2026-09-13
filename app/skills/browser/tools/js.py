@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.security.urlpolicy import scan_js_for_blocked_urls
 from app.skills.browser.service import BrowserDriver
 from app.tools.base import Tool, ToolPermission, ToolResult
 
@@ -22,6 +23,11 @@ class BrowserJsTool(Tool):
         if not expression:
             return ToolResult(
                 name=self.name, success=False, data={}, error="Informe a expressão JS."
+            )
+        blocked = scan_js_for_blocked_urls(expression)
+        if blocked:
+            return ToolResult(
+                name=self.name, success=False, data={}, error=blocked,
             )
         driver = self._driver()
         try:

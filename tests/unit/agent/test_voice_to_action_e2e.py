@@ -10,6 +10,15 @@ NUNCA pode produzir "não entendi" quando a tool está disponível e a execuçã
 """
 from __future__ import annotations
 
+
+async def _approve(candidate):
+    return True
+
+
+async def _deny(candidate):
+    return False
+
+
 import pytest
 
 from app.agent.reliable import ReliableAgentCore
@@ -109,7 +118,7 @@ def _build_agent(*, verify_achieved: bool = True, llm_responses=None):
         memory_service=FakeMemoryService(),
         skill_registry=registry,
         facilitator=AssistantFacilitator(skill_registry=registry),
-        permission_request_handler=lambda _: True,
+        permission_request_handler=_approve,
     )
     agent.settings.agent_require_tool_verification = True
     return agent, open_app, verify

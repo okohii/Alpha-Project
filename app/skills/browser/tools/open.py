@@ -1,19 +1,15 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
+from app.security.urlpolicy import normalize_url
 from app.skills.browser.service import BrowserDriver
 from app.tools.base import Tool, ToolPermission, ToolResult
 
 
 def _coerce_url(url: str) -> str:
-    url = url.strip()
-    if not url:
-        return ""
-    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
-        return "https://" + url
-    return url
+    """Coerção de URL — fonte única em ``app.security.urlpolicy``."""
+    return normalize_url(url)
 
 
 class BrowserOpenTool(Tool):
@@ -34,6 +30,15 @@ class BrowserOpenTool(Tool):
         url = _coerce_url(str(kwargs.get("url", "")))
         if not url:
             return ToolResult(name=self.name, success=False, data={}, error="Informe a URL.")
+        # SSRF hardening (Parte 7/39): destinos proibidos nunca são navegados.
+        from app.security.urlpolicy import UnsafeUrlError, coerce_safe_url
+
+        try:
+            url = coerce_safe_url(url)
+        except UnsafeUrlError as exc:
+            return ToolResult(
+                name=self.name, success=False, data={}, error=f"destino bloqueado: {exc}"
+            )
         driver = self._driver()
         try:
             await driver.start_browser(url)

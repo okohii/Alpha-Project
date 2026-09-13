@@ -6,6 +6,20 @@ from app.memory.service import MemoryService
 from app.tools.base import Tool, ToolPermission, ToolResult
 
 
+def _semantic_view(memory: Any) -> dict[str, Any]:
+    """Vista semântica para o LLM: contexto útil, sem vetor/metadata interna.
+
+    O modelo precisa do CONTEÚDO relevante, não da representação técnica.
+    (Parte 31): vetores, metadados internos e identificadores não são
+    informação semântica.
+    """
+    return {
+        "content": memory.content,
+        "memory_type": memory.memory_type,
+        "importance": memory.importance,
+    }
+
+
 class MemorySearchTool(Tool):
     name = "memory_search"
     description = "Busca memórias relevantes"
@@ -20,7 +34,7 @@ class MemorySearchTool(Tool):
         return ToolResult(
             name=self.name,
             success=True,
-            data={"memories": [memory.model_dump() for memory in memories]},
+            data={"memories": [_semantic_view(memory) for memory in memories]},
         )
 
     def parameters_schema(self) -> dict[str, Any]:

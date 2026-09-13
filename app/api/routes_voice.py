@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import tempfile
 from pathlib import Path
@@ -58,11 +59,16 @@ async def speak(payload: SpeakRequest) -> dict:
 
     if result.get("status") == "ok":
         audio_path = Path(result["audio_path"])
-        payload_bytes = audio_path.read_bytes() if audio_path.exists() else b""
+
+        def _encode_wav() -> str:
+            payload_bytes = audio_path.read_bytes() if audio_path.exists() else b""
+            return base64.b64encode(payload_bytes).decode("utf-8")
+
+        audio_b64 = await asyncio.to_thread(_encode_wav)
         return {
             "status": "ok",
             "text": payload.text,
-            "audio_base64": base64.b64encode(payload_bytes).decode("utf-8"),
+            "audio_base64": audio_b64,
             "mime_type": "audio/wav",
         }
 

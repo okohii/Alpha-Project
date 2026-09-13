@@ -89,13 +89,12 @@ async def test_complex_request_becomes_structured_goal(
     assert outcome.kind == "goal"
     assert outcome.intent.name == "web_search"
     assert outcome.intent.confidence >= 0.6
-    assert outcome.intent.entities.get("browser") == "Chrome"
-    assert outcome.intent.entities.get("query") == "notícias sobre IA"
-    assert len(outcome.goal.tasks) == 1
-    task = outcome.goal.tasks[0]
-    assert task.tool_hint == "web_search"
-    assert task.required_permission == "read"
-    assert task.entities["query"] == "notícias sobre IA"
+    assert len(outcome.goal.tasks) == 2
+    # Multi-step (Fase 4.2): abrir o navegador + pesquisar.
+    search_task = [task for task in outcome.goal.tasks if task.tool_hint == "web_search"]
+    assert search_task, "deve existir uma task de web_search"
+    assert search_task[0].entities["query"] == "notícias sobre IA"
+    assert search_task[0].required_permission == "read"
 
 
 @pytest.mark.anyio
@@ -200,15 +199,16 @@ async def test_clarification_then_answer_fills_slot(
 # ---- 7. Conversa sem tool: direta, sem LLM e sem planejamento ----
 
 @pytest.mark.anyio
-async def test_direct_question_needs_no_tools(facilitator: AssistantFacilitator):
+async def test_direct_question_goes_to_llm(facilitator: AssistantFacilitator):
     outcome = await facilitator.process(
         Request(text="qual é a capital do Brasil", conversation_id="c6")
     )
 
-    assert outcome.kind == "direct"
+    assert outcome.kind == "llm_answer"
     assert outcome.intent.name == "direct_question"
     assert outcome.intent.suggested_skill is None
     assert outcome.goal is None
+    assert outcome.response is None
 
 
 # ---- 8. Integração com o AgentCore (API de chat preservada) ----
@@ -230,6 +230,47 @@ async def test_agent_integration_greeting_is_direct_and_fast():
     assert result["memory_created"] is False
     # Sinais de observabilidade do bloco direto.
     assert result["conversation_id"]
+
+
+@pytest.mark.anyio
+async def test_agent_integration_simple_question_answered_by_llm_default():
+    """Pergunta factual gera turno de LLM real, sem expor ferramentas."""
+    calls: list = []
+
+    class CapturingProvider:
+        async def complete(
+            self, messages: list, tools: list | None = None
+        ) -> LLMResponse:
+            calls.append(messages)
+            return LLMResponse(content="Brasília.")
+
+    agent = _agent(CapturingProvider())  # type: ignore[arg-type]
+    agent.facilitator = AssistantFacilitator(
+        skill_registry=build_default_skill_registry()
+    )
+    result = await agent.chat("qual é a capital do Brasil")
+
+    assert result["response"] == "Brasília."
+    assert calls, "pergunta simples deve gerar pelo menos 1 turno de LLM"
+    assert result["tools_used"] == []
+    assert result["exposed_tools"] == []
+    assert result["tool_selection_status"] == "unavailable"
+
+
+@pytest.mark.anyio
+async def test_facilitator_multi_step_goal():
+    """'abra X e pesquise Y' produz um Goal com 2 Tasks (Fase 4.2)."""
+    facilitator = AssistantFacilitator(
+        skill_registry=build_default_skill_registry()
+    )
+    outcome = await facilitator.process(
+        Request(text="abra o chrome e pesquise notícias sobre IA", conversation_id="c-multi")
+    )
+
+    assert outcome.kind == "goal"
+    assert outcome.goal is not None
+    assert len(outcome.goal.tasks) == 2
+    assert outcome.goal.tasks[0].tool_hint != outcome.goal.tasks[1].tool_hint
 
 
 @pytest.mark.anyio

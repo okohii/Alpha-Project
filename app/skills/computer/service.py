@@ -439,12 +439,10 @@ SITE_URLS: dict[str, str] = {
 
 
 def _normalize_url(value: str) -> str:
-    url = (value or "").strip()
-    if not url:
-        return url
-    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
-        url = "https://" + url
-    return url
+    """Coerção de URL — fonte única em ``app.security.urlpolicy``."""
+    from app.security.urlpolicy import normalize_url
+
+    return normalize_url(value)
 
 
 def _parse_shell_exe(command: str) -> str:
@@ -457,8 +455,8 @@ def _parse_shell_exe(command: str) -> str:
     return first[0].strip('"') if first else ""
 
 
-def _default_browser_exe() -> str | None:
-    """Retorna o executável do navegador padrão do sistema (somente Windows)."""
+def default_browser_progid() -> str | None:
+    """ProgId do navegador padrão (registro Windows) — fonte única."""
     if os.name != "nt":
         return None
     import winreg
@@ -475,6 +473,16 @@ def _default_browser_exe() -> str | None:
                 break
         except OSError:
             continue
+    return progid
+
+
+def _default_browser_exe() -> str | None:
+    """Retorna o executável do navegador padrão do sistema (somente Windows)."""
+    if os.name != "nt":
+        return None
+    import winreg
+
+    progid = default_browser_progid()
     if not progid:
         return None
     for hive, base in (

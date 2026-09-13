@@ -3,8 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import signal
-from typing import Sequence
-
+from collections.abc import Sequence
 
 MODES = ("chat", "macros")
 

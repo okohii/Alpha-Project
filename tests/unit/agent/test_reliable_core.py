@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from app.agent.planner import Planner
 from app.agent.reliable import Complexity, ComplexityGate, ReliableAgentCore
 from app.assistant.intent import Goal, Intent, Task
-from app.agent.planner import Planner
 
 
 def test_complexity_gate_distinguishes_simple_medium_complex():

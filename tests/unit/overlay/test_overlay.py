@@ -123,10 +123,36 @@ def run_asset(path: str) -> FileResponse:
 
 def test_ws_voice_without_audio_returns_error():
     client = TestClient(app)
-    with client.websocket_connect("/overlay/ws") as ws:
+    with client.websocket_connect(
+        "/overlay/ws", headers={"origin": "http://127.0.0.1:18080"}
+    ) as ws:
         ws.send_json({"action": "voice", "audio_base64": ""})
         message = ws.receive_json()
         assert message["type"] == "error"
+
+
+def test_ws_rejects_foreign_origin():
+    import pytest as _pytest
+    from starlette.websockets import WebSocketDisconnect
+
+    client = TestClient(app)
+    with _pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/overlay/ws", headers={"origin": "http://evil.example.com"}
+        ):
+            pass
+
+
+def test_ws_rejects_null_origin():
+    import pytest as _pytest
+    from starlette.websockets import WebSocketDisconnect
+
+    client = TestClient(app)
+    with _pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/overlay/ws", headers={"origin": "null"}
+        ):
+            pass
 
 
 def test_event_bus_forward_and_state():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import time
@@ -72,7 +73,7 @@ class ScreenshotTool(Tool):
                 folder = Path(base) / "alpha_screenshots"
                 folder.mkdir(parents=True, exist_ok=True)
                 target = folder / f"screen_{int(time.time())}.png"
-            saved = capture_screen(str(target))
+            saved = await asyncio.to_thread(capture_screen, str(target))
         except (ValueError, OSError, RuntimeError) as exc:
             return ToolResult(name=self.name, success=False, data={}, error=str(exc))
         data: dict[str, Any] = {"path": saved, "saved": True, "scope": "virtual_desktop_all_monitors"}
@@ -130,7 +131,7 @@ class VerifyScreenTool(Tool):
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / f"verify_{int(time.time())}.png"
         try:
-            saved = capture_screen(str(target))
+            saved = await asyncio.to_thread(capture_screen, str(target))
         except (OSError, RuntimeError) as exc:
             return ToolResult(name=self.name, success=False, data={}, error=str(exc))
         result = await self.verifier.verify(saved, goal, max_retries=max_retries)

@@ -1,4 +1,4 @@
-from .manager import InteractionManager, InteractionDecision
+from .manager import InteractionDecision, InteractionManager
 from .state import InteractionState
 
 __all__ = ["InteractionDecision", "InteractionManager", "InteractionState"]

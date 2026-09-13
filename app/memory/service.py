@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Sequence
+from typing import Any
 from uuid import uuid4
 
 from app.core.config import get_settings
@@ -12,7 +13,6 @@ from app.memory.embeddings import EmbeddingProvider
 from app.memory.episode import build_episode_memory, detect_kind
 from app.memory.policies import is_expired, preference_key, utcnow
 from app.memory.repository import MemoryRepositoryProtocol
-from app.memory.types import MemoryType
 
 
 @dataclass(slots=True)
@@ -30,7 +30,7 @@ class MemoryItem:
     expiration: datetime | None
 
     def model_dump(self) -> dict[str, Any]:
-        return {"id": self.id, "content": self.content, "memory_type": self.memory_type, "type": self.memory_type, "source": self.source, "importance": self.importance, "confidence": self.confidence, "embedding": self.embedding, "metadata": self.metadata, "created_at": self.created_at.isoformat(), "updated_at": self.updated_at.isoformat(), "expiration": self.expiration.isoformat() if self.expiration else None}
+        return {"id": self.id, "content": self.content, "memory_type": self.memory_type, "source": self.source, "importance": self.importance, "confidence": self.confidence, "embedding": self.embedding, "metadata": self.metadata, "created_at": self.created_at.isoformat(), "updated_at": self.updated_at.isoformat(), "expiration": self.expiration.isoformat() if self.expiration else None}
 
 
 class MemoryService:
@@ -126,7 +126,14 @@ class MemoryService:
 
     async def save_episode(self, user_message: str, response: str, tool_names: list[str] | None = None, *, confidence: float = 1.0, metadata: dict[str, Any] | None = None) -> MemoryItem | None:
         if detect_kind(user_message or "") == "preferencia":
-            return await self.save_preference(user_message.strip(), source="agent", confidence=confidence, metadata=metadata)
+            # Preferência identificada no chat vira Preferência persistente
+            # (não episódio), com origem/proveniência preservada.
+            return await self.save_preference(
+                user_message.strip(),
+                source="agent",
+                confidence=confidence,
+                metadata={**(metadata or {}), "episode": True},
+            )
         tools = tool_names or []
         importance = 0.85 if tools else self.score_importance(user_message)
         if importance < self.settings.memory_min_importance:

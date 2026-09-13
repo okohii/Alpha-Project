@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.db.session import get_session
 from app.memory.embeddings import LocalEmbeddingProvider
-from app.memory.repository import MemoryRepository
+from app.memory.repository import SqliteMemoryRepository
 from app.memory.service import MemoryService
 
 router = APIRouter(prefix="/memories", tags=["memories"])
@@ -21,13 +21,13 @@ class MemoryCreateRequest(BaseModel):
 
 @router.get("")
 async def list_memories(session=Depends(get_session)) -> list[dict]:
-    service = MemoryService(MemoryRepository(session), LocalEmbeddingProvider())
+    service = MemoryService(SqliteMemoryRepository(session), LocalEmbeddingProvider())
     return [memory.model_dump() for memory in await service.list_memories()]
 
 
 @router.post("")
 async def create_memory(payload: MemoryCreateRequest, session=Depends(get_session)) -> dict:
-    service = MemoryService(MemoryRepository(session), LocalEmbeddingProvider())
+    service = MemoryService(SqliteMemoryRepository(session), LocalEmbeddingProvider())
     memory = await service.save_memory(
         content=payload.content,
         memory_type=payload.memory_type,
@@ -40,6 +40,6 @@ async def create_memory(payload: MemoryCreateRequest, session=Depends(get_sessio
 
 @router.delete("/{memory_id}")
 async def delete_memory(memory_id: str, session=Depends(get_session)) -> dict:
-    service = MemoryService(MemoryRepository(session), LocalEmbeddingProvider())
+    service = MemoryService(SqliteMemoryRepository(session), LocalEmbeddingProvider())
     await service.delete_memory(memory_id)
     return {"deleted": True, "id": memory_id}

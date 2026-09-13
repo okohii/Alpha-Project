@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from app.security import AccessDeniedError
@@ -18,7 +19,7 @@ class FileInfoTool(Tool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             path = str(kwargs.get("path", ""))
-            info = self.file_manager.file_info(path)
+            info = await asyncio.to_thread(self.file_manager.file_info, path)
             return ToolResult(name=self.name, success=True, data=info)
         except (AccessDeniedError, OSError) as exc:
             return ToolResult(name=self.name, success=False, data={}, error=exc)

@@ -202,3 +202,70 @@ def test_describe_current_exposes_resolution():
     assert payload["effective_mode"] == "local"
     assert payload["selected_route"] == "local"
     assert "fallback_reason" in payload
+
+
+# ---- streaming tolerante a falhas (Fase 4.3) ----
+
+class _StreamingProvider(FakeProvider):
+    async def stream_turn(self, messages, tools=None, temperature=0.2):
+        from app.llm.base import StreamedResponse
+
+        streamed = StreamedResponse()
+
+        async def _gen():
+            for token in (f"{self.label}-token-", "1", "2", "3"):
+                yield token
+
+        streamed.generator = _gen()
+        return streamed
+
+
+class _FailingStreamingProvider(FakeProvider):
+    async def stream_turn(self, messages, tools=None, temperature=0.2):
+        from app.llm.base import StreamedResponse
+
+        streamed = StreamedResponse()
+
+        async def _gen():
+            raise RuntimeError("stream indisponível")
+            yield ""  # pragma: no cover
+
+        streamed.generator = _gen()
+        return streamed
+
+
+@pytest.mark.anyio
+async def test_ftp_streams_from_primary():
+    local = _StreamingProvider("local")
+    provider = FaultTolerantProvider(primary=local, label="local")
+    assert provider.supports_streaming is True
+
+    streamed = await provider.stream_turn([SimpleNamespace(role="user", content="oi")])
+    tokens = [token async for token in streamed]
+    assert tokens == ["local-token-", "1", "2", "3"]
+    assert provider.last_route == "local"
+
+
+@pytest.mark.anyio
+async def test_ftp_streams_fallback_when_primary_fails_before_emitting():
+    failing = _FailingStreamingProvider("cloud")
+    local = FakeProvider("local")
+    provider = FaultTolerantProvider(
+        primary=failing, fallback=local, label="cloud", fallback_label="local"
+    )
+
+    streamed = await provider.stream_turn([SimpleNamespace(role="user", content="oi")])
+    tokens = [token async for token in streamed]
+    assert "resposta-local" in "".join(tokens)
+    assert provider.last_route == "local"
+    assert provider.last_fallback_reason == "cloud_unavailable"
+
+
+@pytest.mark.anyio
+async def test_ftp_without_primary_streaming_degrades_to_complete():
+    plain = FakeProvider("local")
+    provider = FaultTolerantProvider(primary=plain, label="local")
+    assert provider.supports_streaming is False
+
+    response = await provider.stream_turn([SimpleNamespace(role="user", content="oi")])
+    assert response.content == "resposta-local"

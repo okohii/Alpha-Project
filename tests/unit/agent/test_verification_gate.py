@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from app.agent.serialized import SerializedAgentCore
-from app.llm.base import ExecutionEvidence
 from app.evidence import Evidence, EvidenceKind, VerificationResult, VerificationService
+from app.llm.base import ExecutionEvidence
 
 
 def _core() -> SerializedAgentCore:
@@ -69,7 +69,11 @@ def test_verified_postcondition_allows_success_claim():
     assert result == "Enviei a mensagem com sucesso."
 
 
-def test_visual_verification_promotes_prior_strict_action():
+def test_visual_verification_does_not_promote_unrelated_strict_action():
+    """H9: prova visual de UMA ação não promove OUTRAS strict actions.
+
+    Uma evidência só valida a propriedade que ela realmente suporta.
+    """
     action = ExecutionEvidence(
         action_id="a1",
         tool="mouse_click",
@@ -91,7 +95,7 @@ def test_visual_verification_promotes_prior_strict_action():
         status="verified",
     )
 
-    SerializedAgentCore._correlate_visual_verification([action, visual])
-
-    assert action.verified is True
-    assert action.status == "verified"
+    # Sem generalização: a ação estrita permanece UNVERIFIED.
+    assert action.verified is False
+    assert action.status == "executed_unverified"
+    assert visual.verified is True

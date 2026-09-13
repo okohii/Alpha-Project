@@ -290,6 +290,63 @@ class LLMRouter:
         return payload
 
 
+class _FallbackStreamedResponse:
+    """Streaming tolerante a falhas (Fase 4.3).
+
+    Delega ao ``stream_turn`` da rota primária; caso a primária falhe ANTES de
+    emitir qualquer token, recai para ``fallback.complete`` (conteúdo integral
+    emitido em chunks) — preserva a experiência de streaming mesmo com fallback.
+    Exposição ``tool_calls``/``content`` compatível com o ``StreamedResponse``.
+    """
+
+    def __init__(
+        self,
+        primary_stream: Any,
+        provider: FaultTolerantProvider,
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None,
+        temperature: float,
+    ) -> None:
+        self._primary_stream = primary_stream
+        self._provider = provider
+        self._messages = messages
+        self._tools = tools
+        self._temperature = temperature
+        self.content: str = ""
+        self.tool_calls: list[Any] | None = None
+
+    async def __aiter__(self) -> Any:
+        emitted = False
+        try:
+            async for token in self._primary_stream:
+                emitted = True
+                self.content += token
+                yield token
+        except Exception as exc:
+            if emitted:
+                raise
+            provider = self._provider
+            if provider.fallback is None or not provider.settings_fallback_enabled():
+                raise
+            provider.last_route = provider.fallback_label
+            provider.last_fallback_reason = f"{provider.label}_unavailable"
+            provider._logger.warning(
+                "[LLM ROUTER] stream fallback route=%s reason=%s_unavailable error=%s",
+                provider.fallback_label,
+                provider.label,
+                exc,
+            )
+            response = await provider.fallback.complete(
+                self._messages, tools=self._tools, temperature=self._temperature
+            )
+            content = response.content or ""
+            self.tool_calls = response.tool_calls
+            for index in range(0, len(content), 96):
+                chunk = content[index : index + 96]
+                self.content += chunk
+                yield chunk
+
+
 class FaultTolerantProvider:
     """Provedor tolerante a falhas com rota primária e rota de fallback.
 
@@ -334,6 +391,29 @@ class FaultTolerantProvider:
     @property
     def route(self) -> str:
         return self.last_route
+
+    @property
+    def supports_streaming(self) -> bool:
+        """A rota primária consegue fazer streaming de tokens."""
+        return callable(getattr(self.primary, "stream_turn", None))
+
+    async def stream_turn(
+        self,
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.2,
+    ) -> Any:
+        """Streaming com tolerância a falhas (rota primária com fallback)."""
+        primary_stream = getattr(self.primary, "stream_turn", None)
+        if primary_stream is None:
+            # Rota primária sem suporte a streaming: cai para o caminho
+            # buffered (complete) — comportamento anterior preservado.
+            return await self.complete(messages, tools=tools, temperature=temperature)
+        self.last_route = self.label
+        streamed = await primary_stream(messages, tools=tools, temperature=temperature)
+        return _FallbackStreamedResponse(
+            streamed, self, messages, tools, temperature
+        )
 
     def settings_fallback_enabled(self) -> bool:
         return get_settings().hybrid_cloud_fallback

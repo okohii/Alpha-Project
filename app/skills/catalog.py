@@ -1,5 +1,6 @@
 from app.skills.base import Skill
 from app.skills.browser import SKILL as BROWSER_SKILL
+from app.skills.calendar import SKILL as CALENDAR_SKILL
 from app.skills.computer import SKILL as COMPUTER_SKILL
 from app.skills.documents import SKILL as DOCUMENTS_SKILL
 from app.skills.files import SKILL as FILES_SKILL
@@ -23,17 +24,17 @@ _SKILLS: list[Skill] = [
     SHELL_SKILL,
     REMINDERS_SKILL,
     TASKS_SKILL,
+    CALENDAR_SKILL,
     SYSTEM_SKILL,
 ]
 
 
-def build_default_skill_registry(
-    tools_in_registry: dict[str, object] | None = None,
-) -> SkillRegistry:
-    """Skills padrão agrupando as ferramentas já existentes no registro de tools.
+def build_default_skill_registry() -> SkillRegistry:
+    """Skills padrão agrupando as ferramentas existentes no registro de tools.
 
-    ``tools_in_registry`` é opcional e usado apenas ao inspecionar quais tools o
-    registro possui; as skills aqui definem os grupos conceituais.
+    O vínculo entre skill e tools usa nomes declarados em cada ``Skill``;
+    a checagem de consistência com o ``ToolRegistry`` real fica no runtime
+    (``SkillRegistry.validate_tools``).
     """
     registry = SkillRegistry()
     for skill in _SKILLS:

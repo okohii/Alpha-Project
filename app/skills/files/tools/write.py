@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from app.security import AccessDeniedError
@@ -19,7 +20,7 @@ class FileWriteTool(Tool):
         try:
             path = str(kwargs.get("path", ""))
             content = str(kwargs.get("content", ""))
-            result = self.file_manager.create_file(path, content)
+            result = await asyncio.to_thread(self.file_manager.create_file, path, content)
             return ToolResult(name=self.name, success=True, data=result)
         except (AccessDeniedError, OSError) as exc:
             return ToolResult(name=self.name, success=False, data={}, error=exc)

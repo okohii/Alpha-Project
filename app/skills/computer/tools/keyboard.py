@@ -1,5 +1,6 @@
 """Controle de teclado no Windows: digitar texto e pressionar combinações de teclas."""
 
+import asyncio
 import ctypes
 import os
 import subprocess
@@ -190,11 +191,16 @@ class TypeTextTool(Tool):
         self.launcher = launcher
 
     async def execute(self, **kwargs: Any) -> ToolResult:
+        try:
+            data = await asyncio.to_thread(self._execute_blocking, kwargs)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return ToolResult(name=self.name, success=False, data={}, error=str(exc))
+        return ToolResult(name=self.name, success=True, data=data)
+
+    def _execute_blocking(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         text = str(kwargs.get("text", ""))
         if not text:
-            return ToolResult(
-                name=self.name, success=False, data={}, error="Informe o texto a digitar."
-            )
+            raise ValueError("Informe o texto a digitar.")
         window = str(kwargs.get("app", "") or "").strip()
 
         foreground = _get_foreground_window_title()
@@ -210,15 +216,12 @@ class TypeTextTool(Tool):
             except ValueError:
                 pass
 
-            # Tenta ativar via AppActivate
             activated = False
             for candidate in target_names:
                 if activate_window(candidate):
                     activated = True
                     break
 
-            # Se AppActivate falhou, verifica se a janela já está em primeiro plano
-            # (AppActivate retorna False se a janela já estiver ativa)
             if not activated:
                 foreground = _get_foreground_window_title()
                 if foreground and any(
@@ -227,38 +230,24 @@ class TypeTextTool(Tool):
                 ):
                     focused = True
                 else:
-                    return ToolResult(
-                        name=self.name,
-                        success=False,
-                        data={"window": window, "foreground": foreground},
-                        error=(
-                            f"Não consegui focar a janela do '{window}'. "
-                            "Verifique se o aplicativo está aberto e tente novamente."
-                        ),
+                    raise RuntimeError(
+                        f"Não consegui focar a janela do '{window}'. "
+                        "Verifique se o aplicativo está aberto e tente novamente."
                     )
             focused = True
             activated = True
         else:
-            # Sem app alvo: digita na janela ativa e reporta qual é
             focused = foreground is not None
             activated = False
 
-        try:
-            typed = type_text(text)
-        except (OSError, RuntimeError) as exc:
-            return ToolResult(name=self.name, success=False, data={}, error=str(exc))
-
-        return ToolResult(
-            name=self.name,
-            success=True,
-            data={
-                "typed_chars": typed,
-                "window": window or "active",
-                "focused": focused,
-                "activated": activated,
-                "foreground": foreground,
-            },
-        )
+        typed = type_text(text)
+        return {
+            "typed_chars": typed,
+            "window": window or "active",
+            "focused": focused,
+            "activated": activated,
+            "foreground": foreground,
+        }
 
     def parameters_schema(self) -> dict[str, Any]:
         return {
@@ -285,7 +274,7 @@ class PressKeyTool(Tool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         key = str(kwargs.get("key", "") or "")
         try:
-            sent = press_sequence(key)
+            sent = await asyncio.to_thread(press_sequence, key)
         except (ValueError, OSError, RuntimeError) as exc:
             return ToolResult(name=self.name, success=False, data={}, error=str(exc))
         return ToolResult(name=self.name, success=True, data={"key": key, "pressed": sent})

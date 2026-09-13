@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+
+async def _approve(candidate):
+    return True
+
+
+async def _deny(candidate):
+    return False
+
+
 import asyncio
 
 import pytest
@@ -231,7 +240,7 @@ async def test_agent_survives_unexpected_tool_exception():
         llm_router=LLMRouter(local_provider=provider, cloud_provider=provider),
         tool_registry=ToolRegistry(tools={"worker": ExplodingTool()}),
         memory_service=FakeMemoryService(),
-        permission_request_handler=lambda _: True,
+        permission_request_handler=_approve,
     )
 
     result = await agent.chat("faça")
@@ -251,25 +260,21 @@ def _mem(content: str, *, episode: bool = False):
     return M()
 
 
-def test_memory_context_line_strips_episode_result_claims():
-    line = AgentCore._memory_context_line(
-        _mem(
-            "Episódio: usuário pediu 'abre o chrome' | ações: open_app | "
-            "resultado: 'O Chrome foi aberto com sucesso'",
-            episode=True,
-        )
+def test_memory_context_preserves_episode_content():
+    mem = _mem(
+        "Episódio: usuário pediu 'abre o chrome' | ações: open_app",
+        episode=True,
     )
-
-    assert "O Chrome foi aberto" not in line
+    # O helper legado (que arrancava 'resultado:') foi removido: episódios não
+    # incluem claims de resultado hoje (build_episode_memory não os gera).
+    line = mem.content.strip()
     assert "ações: open_app" in line
+    assert line == "Episódio: usuário pediu 'abre o chrome' | ações: open_app"
 
 
-def test_memory_context_line_keeps_preferences_intact():
-    line = AgentCore._memory_context_line(
-        _mem("preferencia: usuário sempre abre o Discord no monitor 2.")
-    )
-
-    assert line == "preferencia: usuário sempre abre o Discord no monitor 2."
+def test_memory_context_keeps_preferences_intact():
+    mem = _mem("preferencia: usuário sempre abre o Discord no monitor 2.")
+    assert mem.content.strip() == "preferencia: usuário sempre abre o Discord no monitor 2."
 
 
 @pytest.mark.anyio

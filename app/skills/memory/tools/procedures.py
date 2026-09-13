@@ -65,7 +65,11 @@ class ProcedureRunTool(Tool):
             f"procedimento {name}", limit=10
         )
         matches = [
-            memory.model_dump()
+            {
+                "content": memory.content,
+                "memory_type": memory.memory_type,
+                "metadata": dict(memory.metadata or {}),
+            }
             for memory in memories
             if memory.memory_type == "procedimento"
             and (

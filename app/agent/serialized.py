@@ -15,6 +15,7 @@ from app.evidence import (
     VerificationResult,
     VerificationService,
 )
+from app.execution.models import STRICT_VERIFICATION_TOOLS
 from app.llm.base import ExecutionEvidence, LLMMessage, LLMProvider, LLMResponse, ToolCall
 
 logger = logging.getLogger("app.agent.serialized")
@@ -37,30 +38,6 @@ _WEATHER_EVIDENCE_TOOLS = frozenset(
 )
 
 _FAST_POST_TOOL_TOOLS = frozenset({"memory_save", "file_write"})
-
-_STRICT_VERIFICATION_TOOLS = frozenset(
-    {
-        "browser_click",
-        "browser_js",
-        "browser_open",
-        "browser_navigate",
-        "open_app",
-        "open_url",
-        "open_file",
-        "close_app",
-        "move_app",
-        "mouse_click",
-        "mouse_scroll",
-        "type_text",
-        "press_key",
-        "click_text",
-        "run_shell",
-        "run_code",
-        "task_execute",
-        "procedure_run",
-        "macro_run",
-    }
-)
 
 
 class SerializedAgentCore(AgentCore):
@@ -265,34 +242,13 @@ class SerializedAgentCore(AgentCore):
         elif tool_name == "verify_screen":
             execution.verified = visual_verified
             execution.status = "verified" if visual_verified else "executed_unverified"
-        elif tool_name in _STRICT_VERIFICATION_TOOLS:
+        elif tool_name in STRICT_VERIFICATION_TOOLS:
             execution.verified = explicit_verified
             execution.status = "verified" if explicit_verified else "executed_unverified"
         else:
             execution.verified = verification is VerificationResult.SUCCESS or explicit_verified
             execution.status = "verified" if execution.verified else "executed_unverified"
         return message, execution
-
-    @staticmethod
-    def _correlate_visual_verification(
-        executions: list[ExecutionEvidence],
-    ) -> None:
-        visual_ok = any(
-            item.success
-            and item.tool.split("(", 1)[0] == "verify_screen"
-            and item.verified
-            for item in executions
-        )
-        if not visual_ok:
-            return
-        for item in executions:
-            if (
-                item.success
-                and item.tool.split("(", 1)[0] in _STRICT_VERIFICATION_TOOLS
-                and not item.verified
-            ):
-                item.verified = True
-                item.status = "verified"
 
     @staticmethod
     def _fast_post_tool_response(execution: ExecutionEvidence) -> str | None:
@@ -355,24 +311,17 @@ class SerializedAgentCore(AgentCore):
             messages.append(assistant_turn)
             new_messages.append(assistant_turn)
 
-            tool_messages: list[LLMMessage] = []
-            iteration_executions: list[ExecutionEvidence] = []
-            for tool_call in last_response.tool_calls:
-                signature = self._call_signature(tool_call)
-                if signature in executed_signatures:
-                    tool_messages.append(self._repeated_call_message(tool_call))
-                    continue
-                executed_signatures.add(signature)
-                tool_msg, execution = await self._execute_tool(
-                    tool_call, permissions, conversation_id, allowed_names
+            tool_messages, iteration_denied, iteration_executions = await (
+                self._execute_tool_batch(
+                    last_response.tool_calls,
+                    permissions,
+                    conversation_id,
+                    allowed_names,
+                    executed_signatures,
+                    evidence,
                 )
-                tool_messages.append(tool_msg)
-                if execution is not None:
-                    evidence.append(execution)
-                    iteration_executions.append(execution)
-                else:
-                    denied_count += 1
-            self._correlate_visual_verification(evidence)
+            )
+            denied_count += iteration_denied
             messages.extend(tool_messages)
             new_messages.extend(tool_messages)
 
@@ -509,7 +458,7 @@ class SerializedAgentCore(AgentCore):
         strict_unverified = [
             item for item in evidence
             if item.success
-            and item.tool.split("(", 1)[0] in _STRICT_VERIFICATION_TOOLS
+            and item.tool.split("(", 1)[0] in STRICT_VERIFICATION_TOOLS
             and not item.verified
         ]
         if strict_unverified and content and (

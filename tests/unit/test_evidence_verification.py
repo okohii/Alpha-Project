@@ -6,16 +6,15 @@ políticas obrigatórias/opcionais.
 """
 from __future__ import annotations
 
-import pytest
+from typing import Any
 
 from app.evidence import (
     Evidence,
     EvidenceKind,
-    VerificationResult,
     VerificationPolicy,
+    VerificationResult,
     VerificationService,
 )
-
 
 # ---- 1. Modelagem Evidence/EvidenceKind ----------------------------------------------------------------------------
 
@@ -127,12 +126,23 @@ def test_service_checks_dom_state_failed():
 
 
 def test_service_checks_accessibility_state():
+    # Prova explícita de sucesso na árvore de acessibilidade.
+    ev = _make_evidence(
+        EvidenceKind.ACCESSIBILITY_STATE,
+        accessibility_state={"success": True, "role": "pushbutton"},
+    )
+    result = service.verify(ev)
+    assert result == VerificationResult.SUCCESS
+
+
+def test_accessibility_observation_is_not_proof():
+    # Ter um elemento com role/checked NÃO prova que a meta foi alcançada.
     ev = _make_evidence(
         EvidenceKind.ACCESSIBILITY_STATE,
         accessibility_state={"role": "pushbutton", "state": {"checked": True}},
     )
     result = service.verify(ev)
-    assert result == VerificationResult.SUCCESS
+    assert result == VerificationResult.UNCERTAIN
 
 
 def test_service_checks_filesystem_state():
@@ -172,19 +182,21 @@ def test_fails_on_dom_error():
 
 
 def test_service_fallsback_to_vision_with_screenshot_and_ocr():
+    # Screenshot + OCR presentes provam observação, NÃO sucesso da meta.
     ev = _make_evidence(
         EvidenceKind.SCREENSHOT,
         screenshot="/tmp/img.png",
         ocr={"text": "Enviar", "confidence": 0.95},
     )
     result = service.verify(ev)
-    assert result == VerificationResult.SUCCESS
+    assert result == VerificationResult.UNCERTAIN
 
 
 def test_service_fallsback_to_vision_with_ocr_only():
+    # OCR por si só não é prova (Estratégia: ausência de prova ≠ sucesso).
     ev = _make_evidence(EvidenceKind.OCR, ocr={"text": "Salvar", "confidence": 0.9})
     result = service.verify(ev)
-    assert result == VerificationResult.SUCCESS
+    assert result == VerificationResult.UNCERTAIN
 
 
 def test_service_uncertain_when_no_evidence():

@@ -179,6 +179,9 @@ APP_NAME=ALPHA
 APP_ENV=development
 DATABASE_URL=sqlite+aiosqlite:///./alpha.db
 
+# Token obrigatório para /chat REST (fail-closed se vazio).
+ALPHA_LOCAL_API_TOKEN=
+
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=
 LLM_MODE=local
@@ -189,6 +192,8 @@ MEMORY_MIN_IMPORTANCE=0.70
 RAG_TOP_K=5
 AGENT_MAX_TOOL_ITERATIONS=8
 ```
+
+> A API REST recebe operações sensíveis via `ALPHA_LOCAL_API_TOKEN` (header `X-Alpha-Token` ou `Authorization: Bearer`). Sem token configurado, `/chat` e as rotas de execução são recusadas. Os WebSockets locais (Avatar/Overlay) validam a origem da conexão. Diretórios permitidos sem `ALLOWED_DIRECTORIES`: cwd + Downloads/Documents/Desktop (o home inteiro nunca é incluído por padrão).
 
 ### Se quiser usar PostgreSQL
 

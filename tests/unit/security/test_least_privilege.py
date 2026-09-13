@@ -8,6 +8,15 @@ macro auto-redirect exige confirmação e classificação de ação.
 """
 from __future__ import annotations
 
+
+async def _approve(candidate):
+    return True
+
+
+async def _deny(candidate):
+    return False
+
+
 import json
 from pathlib import Path
 from typing import Any
@@ -16,6 +25,7 @@ from unittest.mock import patch
 import pytest
 
 from app.agent.agent import AgentCore
+from app.core.events import EventType
 from app.llm.base import LLMResponse, ToolCall
 from app.llm.mock import MockLLMProvider
 from app.llm.ollama import _serialize_message
@@ -315,6 +325,33 @@ async def test_sensitive_tool_denied_without_confirmation():
 
 
 @pytest.mark.anyio
+async def test_sensitive_execution_never_auto_approved_by_flag():
+    """run_code/run_shell não são auto-aprovados nem com a flag ligada (EXECUTE_CODE/SHELL)."""
+    import app.agent.agent as agent_module
+
+    original = agent_module.get_settings().agent_auto_approve_sensitive
+    try:
+        agent_module.get_settings().agent_auto_approve_sensitive = True
+        st = SensitiveTool()
+        provider = MockLLMProvider(
+            [
+                LLMResponse(
+                    content="",
+                    tool_calls=[ToolCall(name="run_code", arguments={"code": "print(1)"})],
+                ),
+                LLMResponse(content="ok"),
+            ]
+        )
+        agent = _agent(provider, tools={"run_code": st})
+        result = await agent.chat("execute print(1)")
+        assert st.calls == 0
+        audit = result["security_audit"][0]
+        assert audit["decision"] == "declined"
+    finally:
+        agent_module.get_settings().agent_auto_approve_sensitive = original
+
+
+@pytest.mark.anyio
 async def test_sensitive_tool_confirmed():
     """Ferramenta sensível com handler que confirma: executado."""
     confirmed: list[str] = []
@@ -359,7 +396,7 @@ async def test_confirmation_declined():
         ]
     )
     st = SensitiveTool()
-    agent = _agent(provider, tools={"run_code": st}, handler=lambda _: False)
+    agent = _agent(provider, tools={"run_code": st}, handler=_deny)
     result = await agent.chat("rode x")
 
     assert st.calls == 0
@@ -409,7 +446,7 @@ async def test_write_negative_confirmation():
         ]
     )
     wt = WriteTool()
-    agent = _agent(provider, tools={"file_write": wt}, handler=lambda _: False)
+    agent = _agent(provider, tools={"file_write": wt}, handler=_deny)
     await agent.chat("salve x")
 
     assert wt.calls == 0
@@ -459,7 +496,7 @@ async def test_injection_content_cannot_grant_sensitive_access():
     agent = _agent(
         provider,
         tools={"browser_text": bt, "run_code": st},
-        handler=lambda _: False,
+        handler=_deny,
     )
     result = await agent.chat("abra a página e execute")
 
@@ -546,74 +583,15 @@ async def test_action_confirmation_never_persists_whitelist():
         fm._ensure_allowed(Path("/any"))
 
 
-# ---- 12. Macro auto-redirect exige confirmação ----
+# ---- 12. Sem auto-redirect de macro por substring (Parte 36) ----
 
 @pytest.mark.anyio
-async def test_macro_auto_redirect_requires_confirmation():
-    """Auto-redirect para macro_run exige confirmação separada (sensitive)."""
-    macro_run = MacroRunTool()
-    type_text = TypeTextTool()
-    confirmed: list[str] = []
+async def test_macro_auto_redirect_removed_no_implicit_redirect():
+    """Nome de macro nos argumentos NÃO redireciona a chamada.
 
-    async def handler(candidate: str) -> bool:
-        confirmed.append(candidate)
-        # Confirma o write mas nega o macro
-        if "macro_run" in candidate:
-            return False
-        return True
-
-    # Falso MacroRecord
-    class FakeMacro:
-        def __init__(self, mid: str, name: str) -> None:
-            self.id = mid
-            self.name = name
-
-    fake_macros = [FakeMacro("m1", "acionar led")]
-
-    # Mock do macro_service
-    class FakeMacroService:
-        async def list_macros(self, enabled_only: bool = True):
-            return fake_macros
-
-    provider = MockLLMProvider(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        name="type_text",
-                        arguments={"text": "acionar led"},
-                    )
-                ],
-            ),
-            LLMResponse(content="feito"),
-        ]
-    )
-    agent = _agent(
-        provider,
-        tools={"type_text": type_text, "macro_run": macro_run},
-        handler=handler,
-    )
-
-    with patch(
-        "app.macros.service.macro_service", FakeMacroService(), create=True
-    ):
-        result = await agent.chat("acionar led")
-
-    # Macro NÃO foi executada (confirmação negada).
-    assert macro_run.calls == 0
-    # type_text TAMBÉM NÃO (auto-redirect retorna com negação antes de executar).
-    assert type_text.calls == 0
-    # A auditoria registra a decisão negada com motivo de macro sensível.
-    declined = [a for a in result["security_audit"] if a["decision"] == "declined"]
-    assert len(declined) == 1
-    assert "macro" in declined[0]["reason"]
-    assert declined[0]["result"] == "not_executed"
-
-
-@pytest.mark.anyio
-async def test_macro_auto_redirect_runs_when_confirmed():
-    """Auto-redirect executa a macro quando a confirmação é concedida."""
+    A chamada da tool é executada como pedida; macro_run só roda quando o LLM
+    a referencia EXPLICITAMENTE (via tool `macro_run`). Nunca por substring.
+    """
     macro_run = MacroRunTool()
     type_text = TypeTextTool()
     confirmed: list[str] = []
@@ -651,15 +629,48 @@ async def test_macro_auto_redirect_runs_when_confirmed():
     with patch(
         "app.macros.service.macro_service", FakeMacroService(), create=True
     ):
-        result = await agent.chat("acionar led")
+        await agent.chat("acionar led")
 
-    # A macro foi executada; a tool original NÃO.
-    assert macro_run.calls == 1
-    assert type_text.calls == 0
-    assert "macro_run" in confirmed[0] or "macro_run" in str(confirmed)
-    audit = result["security_audit"][0]
-    assert audit["tool"] == "type_text"
-    assert audit["result"] == "success"
+    # A tool ORIGINAL executou; a macro NUNCA foi acionada por substring.
+    assert type_text.calls == 1
+    assert macro_run.calls == 0
+    # Nenhuma confirmação sensível de macro (não houve redirect).
+    assert not any("macro_run" in c for c in confirmed)
+
+
+@pytest.mark.anyio
+async def test_explicit_macro_run_still_confirmed_and_blocks_without_approval():
+    """macro_run explícito segue sendo sensível: nega sem aprovação."""
+    macro_run = MacroRunTool()
+    type_text = TypeTextTool()
+    confirmed: list[str] = []
+
+    async def handler(candidate: str) -> bool:
+        confirmed.append(candidate)
+        return False  # nega macro_run
+
+    provider = MockLLMProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(name="macro_run", arguments={"macro_id": "m1"})
+                ],
+            ),
+            LLMResponse(content="feito"),
+        ]
+    )
+    agent = _agent(
+        provider,
+        tools={"type_text": type_text, "macro_run": macro_run},
+        handler=handler,
+    )
+
+    result = await agent.chat("executa a macro")
+
+    assert macro_run.calls == 0
+    declined = [a for a in result["security_audit"] if a["decision"] == "declined"]
+    assert any("sensível" in a["reason"] or "macro" in a["reason"] for a in declined)
 
 
 # ---- 13. Política unitária: classify_action ----
@@ -707,3 +718,112 @@ def test_risk_requires_confirmation_medium_write_true():
 def test_risk_requires_confirmation_low_write_false():
     # Ferramenta write não listada em MEDIUM/HIGH
     assert risk_requires_confirmation("memory_search", ToolPermission.write) is False
+
+
+def test_privacy_sensitive_observe_requires_confirmation():
+    # Captura de tela/câmera exige confirmação mesmo em read/observe.
+    assert risk_requires_confirmation("screenshot", ToolPermission.write) is True
+    assert risk_requires_confirmation("verify_screen", ToolPermission.read) is True
+    assert risk_requires_confirmation("detect_camera", ToolPermission.write) is True
+    # Observação não sensorial permanece automática.
+    assert risk_requires_confirmation("read_ui", ToolPermission.read) is False
+
+
+# ---- Redação de arguments (P33/C2) ----
+
+def _events(agent: AgentCore, provider: MockLLMProvider) -> list[dict]:
+    captured: list[dict] = []
+
+    original = agent._emit
+
+    def spy(event_type, payload=None, duration_ms=None):
+        captured.append({"type": event_type.value, "payload": payload or {}})
+        return original(event_type, payload, duration_ms)
+
+    agent._emit = spy  # type: ignore[assignment]
+    return captured
+
+
+@pytest.mark.anyio
+async def test_tool_started_event_redacts_secret_arguments():
+    provider = MockLLMProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        name="web_search",
+                        arguments={"query": "ok", "api_key": "sk-1234567890"},
+                    )
+                ],
+            ),
+            LLMResponse(content="pronto"),
+        ]
+    )
+    agent = _agent(provider, tools={"web_search": ReadTool()})
+    events = _events(agent, provider)
+    await agent.chat("pesquise")
+
+    started = [e for e in events if e["type"] == EventType.tool_started.value]
+    assert started
+    args = started[0]["payload"]["arguments"]
+    assert args["api_key"] == "[REDACTED]"
+    assert args["query"] == "ok"
+
+
+@pytest.mark.anyio
+async def test_security_audit_redacts_secret_arguments():
+    provider = MockLLMProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        name="web_search",
+                        arguments={"query": "ok", "password": "senha123"},
+                    )
+                ],
+            ),
+            LLMResponse(content="pronto"),
+        ]
+    )
+    agent = _agent(provider, tools={"web_search": ReadTool()})
+    result = await agent.chat("pesquise")
+
+    audit = [a for a in result["security_audit"] if a["tool"] == "web_search"]
+    assert audit
+    assert audit[0]["arguments"]["password"] == "[REDACTED]"
+    assert audit[0]["arguments"]["query"] == "ok"
+
+
+@pytest.mark.anyio
+async def test_save_message_redacts_tool_call_arguments():
+
+    agent = _agent(MockLLMProvider([LLMResponse(content="ok")]), {})
+    messages: list[dict] = []
+
+    class _FakeDb:
+        def add(self, obj):
+            messages.append(obj)
+
+        async def commit(self):
+            return None
+
+    agent.db_session = _FakeDb()
+    await agent._save_message(
+        "conv-1",
+        "assistant",
+        "vou chamar",
+        tool_calls=[
+            ToolCall(
+                name="web_search",
+                arguments={"api_key": "sk-ABCDEF1234", "query": "ok"},
+            )
+        ],
+    )
+    stored = messages[0]
+    payload = json.loads(stored.content)
+    call = payload["tool_calls"][0]
+    assert call["arguments"]["api_key"] == "[REDACTED]"
+    assert "sk-ABCDEF1234" not in stored.content
+    assert call["arguments"]["query"] == "ok"

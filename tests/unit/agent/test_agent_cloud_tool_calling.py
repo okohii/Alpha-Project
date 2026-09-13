@@ -1,6 +1,15 @@
 """Tool calling no MODO CLOUD em nível de agente: tool é enviada e executada."""
 from __future__ import annotations
 
+
+async def _approve(candidate):
+    return True
+
+
+async def _deny(candidate):
+    return False
+
+
 from unittest.mock import patch
 
 import pytest
@@ -67,7 +76,7 @@ async def test_cloud_mode_calls_tool_and_executes():
         llm_router=router,
         tool_registry=ToolRegistry(tools={"open_app": tool}),
         memory_service=FakeMemory(),
-        permission_request_handler=lambda _: True,
+        permission_request_handler=_approve,
     )
     agent.settings.llm_mode = "cloud"
 
@@ -103,7 +112,7 @@ async def test_cloud_mode_preserves_assistant_before_tool_result():
         llm_router=router,
         tool_registry=ToolRegistry(tools={"open_app": OpenAppTool()}),
         memory_service=FakeMemory(),
-        permission_request_handler=lambda _: True,
+        permission_request_handler=_approve,
     )
     agent.settings.llm_mode = "cloud"
 
