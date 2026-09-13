@@ -26,6 +26,25 @@ from app.tools.registry import build_default_tool_registry
 
 logger = logging.getLogger("app.runtime.application")
 
+# Providers e catálogo de skills não carregam estado de uma AsyncSession.
+# Mantê-los vivos evita reconstrução de infraestrutura pesada em cada /chat.
+_shared_llm_router: LLMRouter | None = None
+_shared_skill_registry: Any | None = None
+
+
+def get_shared_llm_router() -> LLMRouter:
+    global _shared_llm_router
+    if _shared_llm_router is None:
+        _shared_llm_router = LLMRouter(local_provider=ConfiguredOllamaProvider())
+    return _shared_llm_router
+
+
+def get_shared_skill_registry() -> Any:
+    global _shared_skill_registry
+    if _shared_skill_registry is None:
+        _shared_skill_registry = build_default_skill_registry()
+    return _shared_skill_registry
+
 
 async def build_agent(
     session: Any,
@@ -90,7 +109,7 @@ async def build_agent(
         for tool_class in (TaskCreateTool, TaskExecuteTool, TaskListTool, TaskRegisterPathTool):
             tool_registry.tools.setdefault(tool_class.name, tool_class(task_service))
 
-    skill_registry = build_default_skill_registry()
+    skill_registry = get_shared_skill_registry()
     missing_tools = skill_registry.validate_tools(
         tool_registry.tools if hasattr(tool_registry, "tools") else {}
     )
@@ -108,8 +127,6 @@ async def build_agent(
         granted = await permission_prompt(display)
         if not granted:
             return False
-        if is_action_confirmation:
-            return True
         # H7/Parte 19: confirmação de UM caminho não vira permissão permanente.
         # O grant fica APENAS em memória (escopo da sessão do agente), nunca é
         # persistido no banco como allowlist global.
@@ -126,7 +143,7 @@ async def build_agent(
     planner = Planner()
 
     return ReliableAgentCore(
-        llm_router=LLMRouter(local_provider=ConfiguredOllamaProvider()),
+        llm_router=get_shared_llm_router(),
         tool_registry=tool_registry,
         memory_service=memory_service,
         allowed_directories=[str(path) for path in allowed_directories],
