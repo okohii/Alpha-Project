@@ -7,8 +7,10 @@ from app.db.session import get_session
 from app.memory.embeddings import LocalEmbeddingProvider
 from app.memory.repository import SqliteMemoryRepository
 from app.memory.service import MemoryService
+from app.security.api_gate import EXECUTE_ACTION, require_local_api_auth
 
 router = APIRouter(prefix="/memories", tags=["memories"])
+_EXEC = Depends(require_local_api_auth(EXECUTE_ACTION))
 
 
 class MemoryCreateRequest(BaseModel):
@@ -20,26 +22,20 @@ class MemoryCreateRequest(BaseModel):
 
 
 @router.get("")
-async def list_memories(session=Depends(get_session)) -> list[dict]:
+async def list_memories(session=Depends(get_session), _auth=_EXEC) -> list[dict]:
     service = MemoryService(SqliteMemoryRepository(session), LocalEmbeddingProvider())
     return [memory.model_dump() for memory in await service.list_memories()]
 
 
 @router.post("")
-async def create_memory(payload: MemoryCreateRequest, session=Depends(get_session)) -> dict:
+async def create_memory(payload: MemoryCreateRequest, session=Depends(get_session), _auth=_EXEC) -> dict:
     service = MemoryService(SqliteMemoryRepository(session), LocalEmbeddingProvider())
-    memory = await service.save_memory(
-        content=payload.content,
-        memory_type=payload.memory_type,
-        source=payload.source,
-        importance=payload.importance,
-        metadata=payload.metadata,
-    )
+    memory = await service.save_memory(content=payload.content, memory_type=payload.memory_type, source=payload.source, importance=payload.importance, metadata=payload.metadata)
     return memory.model_dump()
 
 
 @router.delete("/{memory_id}")
-async def delete_memory(memory_id: str, session=Depends(get_session)) -> dict:
+async def delete_memory(memory_id: str, session=Depends(get_session), _auth=_EXEC) -> dict:
     service = MemoryService(SqliteMemoryRepository(session), LocalEmbeddingProvider())
     await service.delete_memory(memory_id)
     return {"deleted": True, "id": memory_id}
