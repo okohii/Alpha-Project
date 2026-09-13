@@ -1,21 +1,29 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import PlainTextResponse
 
 from app.llm.ollama import OllamaProvider
+from app.security.api_gate import EXECUTE_ACTION, require_local_api_auth
 from app.services.health.metrics import metrics
 
 router = APIRouter(tags=["health"])
+_EXEC = Depends(require_local_api_auth(EXECUTE_ACTION))
+
+
+@router.get("/health/live")
+async def health_live() -> dict:
+    """Liveness mínima, sem expor estado interno nem exigir segredo."""
+    return {"status": "ok"}
 
 
 @router.get("/health")
-async def health() -> dict:
+async def health(_auth=_EXEC) -> dict:
     return await collect_health()
 
 
 @router.get("/health/llm")
-async def health_llm() -> dict:
+async def health_llm(_auth=_EXEC) -> dict:
     provider = OllamaProvider()
     try:
         available = await provider.health()
@@ -25,7 +33,7 @@ async def health_llm() -> dict:
 
 
 @router.get("/health/database")
-async def health_database() -> dict:
+async def health_database(_auth=_EXEC) -> dict:
     """Verificação REAL da conexão com o banco (SELECT 1)."""
     from sqlalchemy import text
     from app.db.session import AsyncSessionLocal
@@ -38,7 +46,7 @@ async def health_database() -> dict:
 
 
 @router.get("/metrics", response_class=PlainTextResponse)
-async def metrics_endpoint() -> str:
+async def metrics_endpoint(_auth=_EXEC) -> str:
     """Métricas no exposition format text do Prometheus."""
     return metrics.render()
 
