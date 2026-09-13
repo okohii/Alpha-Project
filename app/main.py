@@ -29,17 +29,21 @@ from app.overlay import overlay_router
 from app.reminders.runner import SchedulerRunner
 
 logger = logging.getLogger("app.main")
-
 configure_logging()
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version="0.1.0")
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=["127.0.0.1", "localhost", "::1"],
-)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "::1"])
 
 _scheduler_runner: SchedulerRunner | None = None
 _purge_task: Any | None = None
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 async def _prune_memories() -> int:
@@ -52,20 +56,22 @@ async def _prune_memories() -> int:
     cutoff = now - timedelta(days=max_age_days)
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            __import__("sqlalchemy").select(Memory)
-            .order_by(Memory.importance.desc(), Memory.updated_at.desc())
-        )
+        from sqlalchemy import select
+        result = await session.execute(select(Memory).order_by(Memory.importance.desc(), Memory.updated_at.desc()))
         memories = list(result.scalars().all())
+        removed_ids: set[str] = set()
 
         for memory in memories:
-            if memory.expiration is not None and memory.expiration <= now:
+            expiration = _utc(memory.expiration)
+            created = _utc(memory.created_at)
+            if expiration is not None and expiration <= now:
                 await session.delete(memory)
+                removed_ids.add(str(memory.id))
                 removed += 1
                 continue
-            created = memory.created_at
             if created is not None and created < cutoff and memory.memory_type not in {"profile", "preference"}:
                 await session.delete(memory)
+                removed_ids.add(str(memory.id))
                 removed += 1
                 continue
             if created is not None:
@@ -76,18 +82,18 @@ async def _prune_memories() -> int:
                     memory.importance = target_importance
 
         await session.flush()
-        survivors = [memory for memory in memories if memory not in session.deleted]
+        survivors = [memory for memory in memories if str(memory.id) not in removed_ids]
         if len(survivors) > max_items:
-            survivors.sort(key=lambda item: (float(item.importance), item.updated_at or item.created_at or now))
+            survivors.sort(key=lambda item: (float(item.importance), _utc(item.updated_at) or _utc(item.created_at) or now))
             for memory in survivors[: len(survivors) - max_items]:
                 await session.delete(memory)
+                removed_ids.add(str(memory.id))
                 removed += 1
         await session.commit()
     return removed
 
 
 async def _purge_memory_loop() -> None:
-    """Expurga memórias expiradas e aplica retenção/decay periodicamente."""
     while True:
         try:
             purged = await _prune_memories()
@@ -101,13 +107,11 @@ async def _purge_memory_loop() -> None:
 
 
 def _notify_blocking(message: str) -> None:
-    """Parte bloqueante da notificação (som + toast) — roda fora do event loop."""
     play_notification_sound()
     show_notification("ALPHA - Lembrete", message)
 
 
 def _on_reminder_notification(message: str) -> None:
-    """Chamado quando um lembrete é disparado (despacha para off-thread)."""
     try:
         loop = asyncio.get_running_loop()
         loop.run_in_executor(None, _notify_blocking, message)
@@ -119,11 +123,7 @@ def _on_reminder_notification(message: str) -> None:
 async def app_startup() -> None:
     global _scheduler_runner, _purge_task
     await initialize_database()
-    _scheduler_runner = SchedulerRunner(
-        AsyncSessionLocal,
-        interval_seconds=settings.scheduler_interval_seconds,
-        on_notify=_on_reminder_notification,
-    )
+    _scheduler_runner = SchedulerRunner(AsyncSessionLocal, interval_seconds=settings.scheduler_interval_seconds, on_notify=_on_reminder_notification)
     await _scheduler_runner.start()
     await macro_service.start_scheduler()
     _purge_task = asyncio.create_task(_purge_memory_loop())
