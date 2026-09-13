@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
+
+from app.agent.agent import (
+    RETRY_STRATEGY_HINT,
+    classify_failure,
+)
+from app.agent.serialized import SerializedAgentCore
+from app.core.events import EventType
+from app.execution.models import STRICT_VERIFICATION_TOOLS
+from app.llm.base import ExecutionEvidence, LLMMessage, LLMProvider, LLMResponse
+from app.llm.router import ollama_available
+
+
+class Complexity(StrEnum):
+    SIMPLE = "simple"
+    MEDIUM = "medium"
+    COMPLEX = "complex"
+
+
+@dataclass(frozen=True, slots=True)
+class ComplexityDecision:
+    level: Complexity
+    requires_plan: bool
+    requires_verification: bool
+    reason: str
+
+
+class ComplexityGate:
+    """Gate determinístico barato antes da execução."""
+
+    _COMPLEX_TERMS = (
+        "depois", "em seguida", "primeiro", "segundo passo", "vários passos",
+        "whatsapp", "telegram", "discord", "email", "github", "gitlab",
+        "copiar", "colar", "enviar", "mandar", "clicar", "digitar", "mover",
+        "renomear", "editar", "criar arquivo", "abrir navegador", "navegador",
+        "compare", "analisar", "investigar", "organizar", "automatizar",
+    )
+    _MEDIUM_TERMS = (
+        "abrir", "abra", "abre", "abri", "fechar", "feche", "fecha",
+        "pesquisar", "procurar", "criar", "salvar",
+        "clique", "clicar", "digite", "digitar", "enviar", "mande",
+        "lembrar", "agendar", "arquivo", "pasta", "documento", "macro",
+    )
+
+    def classify(self, text: str) -> ComplexityDecision:
+        normalized = (text or "").strip().lower()
+        words = normalized.split()
+        if len(words) >= 20 or any(term in normalized for term in self._COMPLEX_TERMS):
+            return ComplexityDecision(Complexity.COMPLEX, True, True, "múltiplos passos ou ação externa detectados")
+        if len(words) >= 9 or any(term in normalized for term in self._MEDIUM_TERMS):
+            return ComplexityDecision(Complexity.MEDIUM, False, True, "ação que pode alterar estado ou exigir ferramenta")
+        return ComplexityDecision(Complexity.SIMPLE, False, False, "interação curta e de baixo custo operacional")
+
+
+_OBSERVATION_TOOLS = frozenset({"time", "system_info", "memory_search", "screenshot", "verify_screen"})
+
+
+class ReliableAgentCore(SerializedAgentCore):
+    """Facade final: complexity gate, plano sequencial e verificação pós-ação."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.complexity_gate = ComplexityGate()
+        self._complexity = ComplexityDecision(Complexity.SIMPLE, False, False, "sem tarefa ainda")
+        self._active_task = ""
+        self._vision_verifications = 0
+
+    async def _run_agent_loop(self, provider: LLMProvider, messages: list[LLMMessage], permissions: set[Any], conversation_id: str | None = None, stream_tokens: bool = False, task: str = "", context: Any | None = None, expose_tools: bool = True) -> tuple[LLMResponse, list[LLMMessage]]:
+        self._active_task = task
+        self._vision_verifications = 0  # P27: máximo de verificações visuais por turno
+        self._complexity = self.complexity_gate.classify(task)
+        self._emit(EventType.agent_progress, {"kind": "complexity_gate", "level": self._complexity.level.value, "requires_plan": self._complexity.requires_plan, "requires_verification": self._complexity.requires_verification, "reason": self._complexity.reason})
+        plan = getattr(self, "_plan", None)
+        if self._complexity.requires_plan and plan is None:
+            self._emit(EventType.agent_progress, {"kind": "plan_missing", "message": "Tarefa complexa sem plano estruturado; usando fallback supervisionado."})
+        elif plan is not None:
+            try:
+                from datetime import UTC, datetime
+                plan.status = "running"
+                plan.updated_at = datetime.now(UTC)
+            except Exception:
+                pass
+        return await super()._run_agent_loop(provider, messages, permissions, conversation_id, stream_tokens, task, context, expose_tools)
+
+    def _plan_pending_step(self) -> Any | None:
+        plan = getattr(self, "_plan", None)
+        if plan is None:
+            return None
+        for step in plan.steps:
+            if getattr(step, "status", "pending") not in {"completed", "cancelled"}:
+                return step
+        return None
+
+    def _initial_tool_names(self, task: str, permissions: set[Any]) -> set[str]:
+        names = super()._initial_tool_names(task, permissions)
+        step = self._plan_pending_step()
+        if step is None:
+            return names
+        planned = {step.tool_hint}
+        if self.skill_registry is not None:
+            skill_name = self.skill_registry.skill_for_tool(step.tool_hint)
+            if skill_name:
+                planned.update(self.skill_registry.get_tools_for_skills([skill_name]))
+        planned &= names | {"verify_screen"}
+        narrowed = (names & _OBSERVATION_TOOLS) | planned
+        return narrowed or names
+
+    def _expand_tools(self, allowed: set[str], called: list[str]) -> set[str]:
+        expanded = set(allowed)
+        step = self._plan_pending_step()
+        if step is None:
+            return expanded
+        if self.skill_registry is not None:
+            skill_name = self.skill_registry.skill_for_tool(step.tool_hint)
+            if skill_name:
+                expanded.update(self.skill_registry.get_tools_for_skills([skill_name]))
+        expanded.add(step.tool_hint)
+        expanded.update(_OBSERVATION_TOOLS & set(self.tool_registry.tools))
+        return expanded
+
+    async def _provider_turn(self, provider: LLMProvider, messages: list[LLMMessage], tools: list[dict[str, Any]], stream_tokens: bool) -> LLMResponse:
+        if self._complexity.level is Complexity.SIMPLE:
+            return await super()._provider_turn(provider, messages, tools, stream_tokens)
+        guidance = LLMMessage(role="system", content=("GATE DE EXECUÇÃO: classifique o estado antes de concluir. " f"complexidade={self._complexity.level.value}. Use tool calling nativo. " "Considere ações apenas EXECUTADAS até haver evidência de pós-condição. Depois de uma falha ou verificação incerta, a próxima tentativa deve mudar a estratégia: ferramenta alternativa, alvo/argumentos diferente ou nova observação. Nunca repita cegamente a mesma chamada."))
+        enriched = list(messages)
+        enriched.insert(1 if enriched and enriched[0].role == "system" else 0, guidance)
+        response = await super()._provider_turn(provider, enriched, tools, stream_tokens)
+        if response.tool_calls or not tools or self._complexity.level is Complexity.SIMPLE:
+            return response
+
+        # Diagóstico estrutural: tarefa acionável com tools expostas, mas o
+        # modelo retornou texto sem tool call nativa. Não deixamos isso ser
+        # silencioso — registramos e, quando a rota primária é cloud, tentamos
+        # UMA vez a rota local (modelo causal com tool calling nativo).
+        exposed = sorted(
+            tool["function"]["name"] if isinstance(tool.get("function"), dict) else tool.get("name", "")
+            for tool in tools
+        )
+        self._emit(
+            EventType.tool_selected,
+            {
+                "task": self._active_task,
+                "status": "no_tool_call",
+                "reason": "modelo retornou texto sem tool call nativa para tarefa acionável",
+                "exposed_tools": exposed,
+                "llm_tool_calls": [],
+            },
+        )
+        route = getattr(provider, "route", None) or getattr(provider, "last_route", None)
+        if route == "cloud":
+            local = getattr(provider, "local", None)
+            if local is not None and local is not provider:
+                local_url = getattr(local, "base_url", None)
+                if local_url is None or await ollama_available(str(local_url)):
+                    self._emit(
+                        EventType.agent_progress,
+                        {"kind": "retry_local", "reason": "no_tool_call_on_cloud_route"},
+                    )
+                    retried = await local.complete(enriched, tools=tools, temperature=None)
+                    if retried.tool_calls or (retried.content or "").strip():
+                        return retried
+        return response
+
+    def _checkpoint_for(self, tool_name: str) -> Any | None:
+        plan = getattr(self, "_plan", None)
+        if plan is None:
+            return None
+        for step in plan.steps:
+            if step.tool_hint == tool_name and step.status not in {"completed", "cancelled"}:
+                return step
+        return None
+
+    def _update_plan_checkpoint(self, execution: ExecutionEvidence) -> None:
+        tool_name = execution.tool.split("(", 1)[0]
+        step = self._checkpoint_for(tool_name)
+        if step is None:
+            return
+        step.attempts += 1
+        if not execution.success:
+            step.status = "failed"
+            failure_class = classify_failure(execution.error or "")
+            step.last_failure_class = failure_class
+            self._emit(EventType.task_failed, {"step_id": step.id, "tool": tool_name, "error": execution.error or "falha", "failure_class": failure_class, "retry_strategy": RETRY_STRATEGY_HINT.get(failure_class)})
+            return
+        if tool_name in STRICT_VERIFICATION_TOOLS and not execution.verified:
+            step.status = "running"
+            self._emit(EventType.verification_started, {"step_id": step.id, "tool": tool_name, "expected": step.expected_evidence})
+            return
+        step.status = "completed"
+        plan = getattr(self, "_plan", None)
+        if plan is not None:
+            plan.status = "completed" if all(item.status in {"completed", "cancelled"} for item in plan.steps) else "running"
+        self._emit(EventType.task_step_completed, {"step_id": step.id, "tool": tool_name, "attempts": step.attempts, "verified": execution.verified})
+
+    async def _execute_tool(self, tool_call, permissions, conversation_id, allowed_names):
+        step = self._plan_pending_step()
+        if step is not None and self._complexity.requires_plan and tool_call.name not in _OBSERVATION_TOOLS and tool_call.name != step.tool_hint:
+            self._emit(EventType.task_failed, {"step_id": step.id, "tool": tool_call.name, "error": "tool fora do passo atual do plano"})
+            return (
+                self._tool_result_message(tool_call.name, success=False, response={}, error=f"A ferramenta '{tool_call.name}' não corresponde ao passo atual '{step.tool_hint}'. Execute primeiro o passo planejado." , tool_call_id=tool_call.id),
+                ExecutionEvidence(action_id=f"rejected-{step.id}", tool=tool_call.name, arguments=dict(tool_call.arguments or {}), executed_at="not-executed", success=False, result={}, error="tool fora do passo atual do plano", status="failed", session_id=getattr(self, "session_id", ""), conversation_id=conversation_id),
+            )
+        message, execution = await super()._execute_tool(tool_call, permissions, conversation_id, allowed_names)
+        if execution is None or not execution.success:
+            if execution is not None:
+                self._update_plan_checkpoint(execution)
+            return message, execution
+        tool_name = execution.tool.split("(", 1)[0]
+        if not self._complexity.requires_verification or tool_name not in STRICT_VERIFICATION_TOOLS or tool_name == "verify_screen" or execution.verified:
+            self._update_plan_checkpoint(execution)
+            return message, execution
+        # P27: limite de verificações visuais por turno.
+        max_vision = self.settings.agent_max_vision_verifications
+        if self._vision_verifications >= max_vision:
+            execution.verified = False
+            execution.status = "executed_unverified"
+            self._update_plan_checkpoint(execution)
+            return message, execution
+        self._vision_verifications += 1
+        verifier = self.tool_registry.get("verify_screen") if "verify_screen" in self.tool_registry.tools else None
+        if verifier is None:
+            self._update_plan_checkpoint(execution)
+            return message, execution
+        verify_goal = self._active_task or (getattr(getattr(self, "_plan", None), "expected_result", None) or tool_name)
+        self._emit(EventType.verification_started, {"tool": tool_name, "goal": verify_goal})
+        from app.services.health.metrics import metrics
+
+        metrics.incr("alpha_verifications_total", labels={"tool": tool_name})
+        try:
+            verify_result = await verifier.execute(goal=verify_goal, max_retries=0)
+        except Exception as exc:
+            execution.result = {**(execution.result if isinstance(execution.result, dict) else {}), "verification": {"achieved": None, "error": str(exc)}}
+            execution.status = "executed_unverified"
+            self._update_plan_checkpoint(execution)
+            return message, execution
+        data = verify_result.data if isinstance(verify_result.data, dict) else {}
+        achieved = data.get("achieved") is True
+        execution.result = {**(execution.result if isinstance(execution.result, dict) else {}), "verification": {"achieved": data.get("achieved"), "confidence": data.get("confidence"), "feedback": data.get("feedback") or data.get("details")}}
+        execution.verified = bool(verify_result.success and achieved)
+        execution.status = "verified" if execution.verified else "executed_unverified"
+        self._emit(EventType.verification_completed, {"tool": tool_name, "achieved": achieved, "verified": execution.verified})
+        self._update_plan_checkpoint(execution)
+        return message, execution
+
+    def _apply_honesty_gate(self, content: str, evidence: list[ExecutionEvidence]) -> str:
+        result = super()._apply_honesty_gate(content, evidence)
+        unverified = [item for item in evidence if item.success and item.tool.split("(", 1)[0] in STRICT_VERIFICATION_TOOLS and not item.verified]
+        if unverified and result == content and self._complexity.requires_verification:
+            self._emit(EventType.honesty_gate, {"claim": "unverified_strict_action", "tools": [item.tool for item in unverified], "executed": True, "verified": False})
+            return "A ação foi executada, mas não consegui confirmar a pós-condição. Não vou afirmar que ela foi concluída sem essa evidência."
+        return result
+
+
+__all__ = ["Complexity", "ComplexityDecision", "ComplexityGate", "ReliableAgentCore"]

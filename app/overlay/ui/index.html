@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ALPHA</title>
+  <link rel="stylesheet" href="/overlay/ui/styles.css" />
+</head>
+<body>
+  <div class="overlay">
+    <header class="titlebar">
+      <div class="brand">
+        <span class="logo" id="brandOrb">◉</span>
+        <span class="app-name">ALPHA</span>
+      </div>
+      <div class="state-pill" data-state="idle" id="statePill">
+        <span class="state-dot"></span>
+        <span class="state-text" id="stateText">Repouso</span>
+      </div>
+      <div class="window-controls">
+        <button class="ctrl-btn" id="btnMinimize" title="Minimizar">—</button>
+        <button class="ctrl-btn" id="btnClose" title="Fechar">✕</button>
+      </div>
+    </header>
+
+    <main class="chat-area" id="chatArea" aria-live="polite">
+      <div class="empty-state" id="emptyState">
+        <div class="empty-orb">◉</div>
+        <p>Fale ou escreva para conversar com o ALPHA.</p>
+      </div>
+    </main>
+
+    <section class="execution-feed" id="executionFeed" hidden>
+      <div class="execution-title">EXECUÇÃO</div>
+      <div id="executionList"></div>
+    </section>
+
+    <footer class="input-area">
+      <div class="input-row">
+        <button class="btn-round btn-mic" id="btnMic" title="Ativar voz" aria-label="Ativar voz">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+            <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/>
+            <path d="M19 11a7 7 0 0 1-14 0H3a9 9 0 0 0 8 8.94V23h2v-3.06A9 9 0 0 0 21 11h-2z"/>
+          </svg>
+        </button>
+        <input type="text" class="text-input" id="textInput" placeholder="Pergunte ao ALPHA..." autocomplete="off" spellcheck="false" />
+        <button class="btn-round btn-send" id="btnSend" title="Enviar" aria-label="Enviar">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+            <path d="M3.4 20.4 20.85 12 3.4 3.6 3.39 10.5 15 12 3.39 13.5z"/>
+          </svg>
+        </button>
+      </div>
+      <button class="btn-cancel" id="btnCancel" hidden>Parar execução</button>
+    </footer>
+
+    <div class="modal" id="confirmModal" hidden>
+      <div class="modal-card">
+        <div class="modal-title">O ALPHA quer executar:</div>
+        <div class="modal-tool" id="confirmTool"></div>
+        <pre class="modal-args" id="confirmArgs"></pre>
+        <div class="modal-actions">
+          <button class="btn-deny" id="btnDeny">Negar</button>
+          <button class="btn-approve" id="btnApprove">Permitir</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="/overlay/ui/app.js"></script>
+</body>
+</html>

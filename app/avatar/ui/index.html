@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>ALPHA</title>
+  <link rel="stylesheet" href="/avatar/ui/styles.css" />
+</head>
+<body>
+  <canvas id="astral"></canvas>
+
+  <div id="executionPanel" hidden>
+    <div class="execution-title">EXECUÇÃO</div>
+    <div id="executionList"></div>
+  </div>
+
+  <div id="caption" hidden></div>
+
+  <div id="confirmChip" hidden>
+    <span id="confirmText"></span>
+    <button id="btnDeny">Negar</button>
+    <button id="btnApprove">Permitir</button>
+  </div>
+
+  <button id="closeBtn" title="Fechar">×</button>
+
+  <script src="/avatar/ui/astral.js"></script>
+  <script src="/avatar/ui/app.js"></script>
+</body>
+</html>
