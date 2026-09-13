@@ -124,23 +124,21 @@ class EventBus:
             try:
                 result = handler(event)
                 if inspect.isawaitable(result):
-                    # Compatibilidade: emit continua síncrono e não cria tarefa
-                    # implicitamente, evitando tarefas órfãs em shutdown.
-                    continue
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        result.close()
+                    else:
+                        loop.create_task(result)
             except Exception:
                 continue
 
     async def emit_async(self, event_type: EventType, payload: dict[str, Any] | None = None, duration_ms: int | None = None) -> None:
-        """Emite sem executar redaction/handlers pesados no event loop.
-
-        ``emit`` permanece disponível para os hot paths históricos. Novos
-        consumidores assíncronos devem preferir este método.
-        """
+        """Emite sem executar redaction no event loop e aguarda handlers async."""
         safe_payload = await asyncio.to_thread(self._safe_payload, event_type, payload)
         event = SystemEvent(type=event_type, payload=safe_payload, duration_ms=duration_ms)
         self._record(event)
-        handlers = list(self._subscribers.get(event_type, []))
-        for handler in handlers:
+        for handler in list(self._subscribers.get(event_type, [])):
             try:
                 result = handler(event)
                 if inspect.isawaitable(result):
