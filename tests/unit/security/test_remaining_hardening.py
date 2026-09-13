@@ -29,7 +29,7 @@ def test_file_manager_rejects_traversal(tmp_path: Path):
     outside.write_text("secret", encoding="utf-8")
     manager = FileManager([allowed])
     with pytest.raises(AccessDeniedError):
-        manager._resolve_input("..\\outside.txt", search=False)
+        manager._resolve_input("../outside.txt", search=False)
 
 
 def test_visual_verification_skips_when_vram_is_below_policy(monkeypatch):
