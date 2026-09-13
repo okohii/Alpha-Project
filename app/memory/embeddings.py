@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import re
@@ -17,15 +18,18 @@ class EmbeddingProvider(ABC):
 class LocalEmbeddingProvider(EmbeddingProvider):
     """Embedding local determinístico baseado em hashing de tokens e n-grams.
 
-    Sem dependências externas: combina unigramas e bigramas (normalizados) num
-    vetor esparso de dimensão fixa. Suficiente para similaridade aproximada de
-    memórias curtas sem requerer modelos de embeddings.
+    A computação CPU-bound roda no executor padrão para não bloquear o event
+    loop durante buscas de memória ou indexação de documentos.
     """
 
     def __init__(self, dimensions: int = 384) -> None:
         self.dimensions = dimensions
 
     async def embed(self, text: str) -> list[float]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._embed_sync, text)
+
+    def _embed_sync(self, text: str) -> list[float]:
         vector = [0.0] * self.dimensions
         tokens = _TOKEN_RE.findall((text or "").lower())
         if not tokens:
