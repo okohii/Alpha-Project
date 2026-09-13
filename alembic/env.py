@@ -16,17 +16,26 @@ settings = get_settings()
 
 
 def _sync_url(url: str) -> str:
-    """Converte a URL async (aiosqlite) para o driver sync usado pelo alembic."""
-    return url.replace("sqlite+aiosqlite://", "sqlite://", 1)
+    """Converte drivers assíncronos em drivers síncronos aceitos pelo Alembic."""
+    replacements = (
+        ("postgresql+asyncpg://", "postgresql+psycopg2://"),
+        ("postgresql+psycopg_async://", "postgresql+psycopg2://"),
+        ("sqlite+aiosqlite://", "sqlite://"),
+    )
+    for async_driver, sync_driver in replacements:
+        if url.startswith(async_driver):
+            return url.replace(async_driver, sync_driver, 1)
+    return url
 
 
-config.set_main_option("sqlalchemy.url", _sync_url(settings.database_url))
+sync_url = _sync_url(settings.database_url)
+config.set_main_option("sqlalchemy.url", sync_url)
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=_sync_url(settings.database_url),
+        url=sync_url,
         target_metadata=target_metadata,
         literal_binds=True,
         compare_type=True,
