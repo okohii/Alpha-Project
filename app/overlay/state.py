@@ -4,28 +4,23 @@ from app.core.events import EventType
 from app.core.interaction_state import InteractionPhase, phase_for_event
 
 
-# O overlay expõe apenas o subconjunto de fases relevantes à UI compacta.
 OverlayState = InteractionPhase
 
+# Compatibilidade para consumidores que importam o mapa. A fonte de verdade
+# continua sendo core.interaction_state; diferenças são apenas de apresentação.
 EVENT_TO_STATE = {
-    EventType.assistant_listening: OverlayState.LISTENING,
-    EventType.assistant_transcribing: OverlayState.LISTENING,
-    EventType.agent_started: OverlayState.THINKING,
-    EventType.agent_progress: OverlayState.PLANNING,
-    EventType.tool_started: OverlayState.EXECUTING,
-    EventType.verification_started: OverlayState.VERIFYING,
-    EventType.assistant_thinking: OverlayState.THINKING,
-    EventType.assistant_speaking: OverlayState.SPEAKING,
-    EventType.agent_finished: OverlayState.IDLE,
-    EventType.agent_failed: OverlayState.ERROR,
-    EventType.agent_cancelled: OverlayState.IDLE,
+    event: (OverlayState.LISTENING if phase is OverlayState.PROCESSING else OverlayState.IDLE if phase is OverlayState.SUCCESS else phase)
+    for event in EventType
+    if (phase := phase_for_event(event)) is not None
 }
 
-# Mantido para consumidores antigos que importam os mapas diretamente.
 _POST_TOOL_STATE = {
-    EventType.tool_finished: OverlayState.THINKING,
-    EventType.tool_failed: OverlayState.THINKING,
-    EventType.verification_completed: OverlayState.THINKING,
+    event: OverlayState.THINKING
+    for event in (
+        EventType.tool_finished,
+        EventType.tool_failed,
+        EventType.verification_completed,
+    )
 }
 
 TOOL_EVENTS: set[EventType] = {
@@ -33,13 +28,11 @@ TOOL_EVENTS: set[EventType] = {
     EventType.tool_finished,
     EventType.tool_failed,
 }
-
 TEXT_EVENTS: set[EventType] = {
     EventType.user_message,
     EventType.assistant_message,
     EventType.token_stream,
 }
-
 TERMINAL_EVENTS: set[EventType] = {
     EventType.agent_finished,
     EventType.agent_failed,
@@ -48,8 +41,11 @@ TERMINAL_EVENTS: set[EventType] = {
 
 
 def state_for_event(event_type: EventType) -> OverlayState | None:
-    """Estado canônico compartilhado, convertido para a API histórica do overlay."""
     phase = phase_for_event(event_type)
-    if phase is not None:
-        return phase
-    return EVENT_TO_STATE.get(event_type)
+    if phase is None:
+        return None
+    if phase is OverlayState.PROCESSING:
+        return OverlayState.LISTENING
+    if phase is OverlayState.SUCCESS:
+        return OverlayState.IDLE
+    return phase
