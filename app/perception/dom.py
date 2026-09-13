@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
@@ -32,12 +33,50 @@ class DOMState:
 class DOMTree:
     root: DOMNodeDict | None = None
     nodes: list[DOMNodeDict] = field(default_factory=list)
-    updated_at: float = field(default_factory=lambda: __import__("time").time())
+    updated_at: float = field(default_factory=time.time)
     available: bool = True
 
 
 class DOMPerceptor:
-    """Perceptor de DOM sem fabricar estado quando não existe browser context."""
+    """Perceptor de DOM com adaptador real para o BrowserDriver/CDP.
+
+    O perceptor nunca cria uma árvore fictícia. Quando recebe um BrowserDriver,
+    coleta o estado real do documento por Runtime.evaluate e normaliza os nós
+    para o contrato de percepção do ALPHA.
+    """
+
+    async def perceive_from_browser(self, browser: Any, *, limit: int = 500) -> DOMTree:
+        if browser is None:
+            return self.perceive(None)
+        limit = max(1, min(int(limit), 2000))
+        expression = f"""
+(() => {{
+  const visible = e => {{ const r=e.getBoundingClientRect(); const s=getComputedStyle(e); return !!(r.width && r.height && s.visibility !== 'hidden' && s.display !== 'none'); }};
+  const xpath = e => {{
+    const parts=[]; while(e && e.nodeType===1) {{ let i=1, s=e.previousElementSibling; while(s) {{ if(s.tagName===e.tagName) i++; s=s.previousElementSibling; }} parts.unshift(e.tagName.toLowerCase()+'['+i+']'); e=e.parentElement; }} return '/'+parts.join('/');
+  }};
+  const nodes = Array.from(document.querySelectorAll('*')).slice(0, {limit}).map(e => {{
+    const attrs={{}}; for(const a of Array.from(e.attributes||[])) attrs[a.name]=a.value;
+    const r=e.getBoundingClientRect();
+    const text=(e.innerText || e.textContent || '').trim().replace(/\\s+/g,' ').slice(0,500);
+    const aria={{}}; for(const [k,v] of Object.entries(attrs)) if(k.startsWith('aria-')) aria[k]=v;
+    return {{tag:e.tagName.toLowerCase(), id:e.id||null, class_name:typeof e.className==='string'?e.className:null,
+      classes:Array.from(e.classList||[]), attributes:attrs, text_content:text, inner_html:null,
+      xpath:xpath(e), aria_role:e.getAttribute('role'), aria_attributes:aria, visible:visible(e),
+      focusable:typeof e.tabIndex==='number' && e.tabIndex >= 0, rect:{{left:Math.round(r.left),top:Math.round(r.top),width:Math.round(r.width),height:Math.round(r.height)}}}};
+  }});
+  return {{url:location.href,title:document.title,nodes}};
+}})()
+"""
+        try:
+            result = await browser.evaluate(expression)
+        except Exception:
+            return DOMTree(root=None, nodes=[], available=False)
+        if not isinstance(result, dict) or not isinstance(result.get("nodes"), list):
+            return DOMTree(root=None, nodes=[], available=False)
+        nodes = [node for node in result["nodes"] if isinstance(node, dict)]
+        root = nodes[0] if nodes else None
+        return DOMTree(root=root, nodes=nodes, updated_at=time.time(), available=True)
 
     def perceive(self, dom_tree: DOMTree | None = None) -> DOMTree:
         if dom_tree is not None:
@@ -90,3 +129,6 @@ class DOMPerceptor:
         if "text_content" in tipos:
             return "texto alterado"
         return "mudanças observadas"
+
+
+__all__ = ["DOMNodeDict", "DOMState", "DOMTree", "DOMPerceptor"]
