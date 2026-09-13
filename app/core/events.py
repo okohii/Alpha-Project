@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-EventHandler = Callable[["SystemEvent"], None]
+EventHandler = Callable[["SystemEvent"], None | Awaitable[None]]
 _REDACT_KEYS = {"password", "passwd", "token", "api_key", "apikey", "authorization", "cookie", "secret"}
 _MAX_AUDIT_EVENTS = 5000
 _MAX_REPR = 512
@@ -78,7 +80,7 @@ class SystemEvent:
 
 
 class EventBus:
-    """Barramento síncrono em processo com auditoria limitada e payload redigido."""
+    """Barramento síncrono compatível + caminho async para payload pesado."""
 
     def __init__(self) -> None:
         self._subscribers: dict[EventType, list[EventHandler]] = {}
@@ -104,21 +106,45 @@ class EventBus:
 
         return unsubscribe_all
 
-    def emit(self, event_type: EventType, payload: dict[str, Any] | None = None, duration_ms: int | None = None) -> None:
-        # ``token_stream`` carrega TEXTOS PARCIAIS do modelo (não segredos):
-        # "token" aqui significa token de texto gerado, então a chave não é
-        # redigida senão o TTS/overlay receberiam "[REDACTED]".
+    @staticmethod
+    def _safe_payload(event_type: EventType, payload: dict[str, Any] | None) -> dict[str, Any]:
         if event_type is EventType.token_stream:
-            safe_payload = dict(payload or {})
-        else:
-            safe_payload = _redact(dict(payload or {}))
-        event = SystemEvent(type=event_type, payload=safe_payload, duration_ms=duration_ms)
+            return dict(payload or {})
+        return _redact(dict(payload or {}))
+
+    def _record(self, event: SystemEvent) -> None:
         self._audit.append(event)
         if len(self._audit) > _MAX_AUDIT_EVENTS:
             del self._audit[:-_MAX_AUDIT_EVENTS]
+
+    def emit(self, event_type: EventType, payload: dict[str, Any] | None = None, duration_ms: int | None = None) -> None:
+        event = SystemEvent(type=event_type, payload=self._safe_payload(event_type, payload), duration_ms=duration_ms)
+        self._record(event)
         for handler in list(self._subscribers.get(event_type, [])):
             try:
-                handler(event)
+                result = handler(event)
+                if inspect.isawaitable(result):
+                    # Compatibilidade: emit continua síncrono e não cria tarefa
+                    # implicitamente, evitando tarefas órfãs em shutdown.
+                    continue
+            except Exception:
+                continue
+
+    async def emit_async(self, event_type: EventType, payload: dict[str, Any] | None = None, duration_ms: int | None = None) -> None:
+        """Emite sem executar redaction/handlers pesados no event loop.
+
+        ``emit`` permanece disponível para os hot paths históricos. Novos
+        consumidores assíncronos devem preferir este método.
+        """
+        safe_payload = await asyncio.to_thread(self._safe_payload, event_type, payload)
+        event = SystemEvent(type=event_type, payload=safe_payload, duration_ms=duration_ms)
+        self._record(event)
+        handlers = list(self._subscribers.get(event_type, []))
+        for handler in handlers:
+            try:
+                result = handler(event)
+                if inspect.isawaitable(result):
+                    await result
             except Exception:
                 continue
 
