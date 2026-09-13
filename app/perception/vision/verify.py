@@ -10,9 +10,6 @@ from app.core.config import get_settings
 
 _MIN_VISUAL_CONFIDENCE = 0.80
 
-
-# P30: política de recursos — no máximo 1 inferência visual simultânea para
-# não estourar VRAM em hardware com ~6 GB quando o LLM também está residente.
 _vision_sem: asyncio.Semaphore | None = None
 
 
@@ -47,18 +44,19 @@ class OllamaVisionVerifier:
         except Exception:
             return False
 
-    async def verify(self, image_path: str, goal: str, max_retries: int = 0, retry_delay: float = 2.0) -> dict[str, Any]:
+    async def verify(self, image_path: str, goal: str, max_retries: int = 1, retry_delay: float = 1.0) -> dict[str, Any]:
+        """Verifica uma pós-condição e repete apenas quando a evidência é inconclusiva."""
         attempts = 0
         details: list[dict[str, Any]] = []
+        retries = max(0, min(2, int(max_retries)))
         while True:
             attempt = await self._describe(image_path, goal)
             details.append(attempt)
             achieved = attempt.get("achieved")
             confidence = float(attempt.get("confidence", 0.0) or 0.0)
-            # True só é aceito quando a confiança também passa o piso.
             if achieved is True and confidence >= _MIN_VISUAL_CONFIDENCE:
                 return {"achieved": True, "confidence": confidence, "attempts": attempts + 1, "last": attempt, "details": details}
-            if attempts >= max_retries:
+            if attempts >= retries:
                 return {"achieved": False if achieved is False else None, "confidence": confidence, "attempts": attempts + 1, "last": attempt, "details": details}
             attempts += 1
             await asyncio.sleep(max(0.0, retry_delay))
@@ -70,16 +68,13 @@ class OllamaVisionVerifier:
             return {"achieved": None, "confidence": 0.0, "feedback": "visão SKIPPED: VRAM livre insuficiente"}
         try:
             async with _acquire_vision_slot():
-                raw = await self.provider.describe(
-                    image_path, max_chars=2000, prompt=build_verify_prompt(goal)
-                )
+                raw = await self.provider.describe(image_path, max_chars=2000, prompt=build_verify_prompt(goal))
         except Exception as exc:
             return {"achieved": None, "confidence": 0.0, "feedback": f"erro de visão: {exc}"}
         return _parse_verdict(raw)
 
 
-# VRAM livre (nvidia-smi) — política de recursos (P30). 0 = desabilitada.
-_vram_cache: tuple[float, int | None] | None = None  # (ts, free_mb or None)
+_vram_cache: tuple[float, int | None] | None = None
 _VRAM_TTL = 5.0
 
 
@@ -92,12 +87,8 @@ def _nvidia_free_vram_mb() -> int | None:
     try:
         import shutil
         import subprocess
-
         if shutil.which("nvidia-smi"):
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5,
-            )
+            result = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0 and result.stdout.strip().splitlines():
                 free_mb = int(float(result.stdout.strip().splitlines()[0]))
     except Exception:
@@ -112,12 +103,11 @@ def _vram_allows_vision() -> bool:
         return True
     free_mb = _nvidia_free_vram_mb()
     if free_mb is None:
-        return True  # sem nvidia-smi: não bloqueia
+        return True
     return free_mb >= minimum
 
 
 async def _vram_allows_vision_async() -> bool:
-    """Versão off-loop: ``nvidia-smi`` é um subprocesso bloqueante (P-3)."""
     return await asyncio.to_thread(_vram_allows_vision)
 
 
@@ -147,11 +137,7 @@ def _parse_verdict(raw: str) -> dict[str, Any]:
         confidence = max(0.0, min(1.0, float(confidence)))
     except (TypeError, ValueError):
         confidence = 0.0
-    return {
-        "achieved": achieved if isinstance(achieved, bool) else None,
-        "confidence": confidence,
-        "feedback": str(parsed.get("feedback", "") or ""),
-    }
+    return {"achieved": achieved if isinstance(achieved, bool) else None, "confidence": confidence, "feedback": str(parsed.get("feedback", "") or "")}
 
 
 def get_vision_verifier() -> OllamaVisionVerifier:

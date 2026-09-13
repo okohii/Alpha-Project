@@ -17,8 +17,8 @@ COPY scripts /app/scripts
 
 RUN pip install --upgrade pip && pip install -e .
 
-# A API REST continua disponível dentro do container (modo server).
-# Use `alpha` no host para a CLI interativa.
+# A publicação externa é controlada pelo docker-compose, que expõe a porta
+# somente em 127.0.0.1. O processo precisa ouvir na interface do container.
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

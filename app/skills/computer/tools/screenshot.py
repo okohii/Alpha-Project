@@ -13,12 +13,7 @@ from app.tools.base import Tool, ToolPermission, ToolResult
 
 
 def capture_screen(path: str) -> str:
-    """Capture the complete Windows virtual desktop, including every monitor.
-
-    Using VirtualScreen instead of PrimaryScreen is intentional: verification must
-    be able to find a target on any connected display, including monitors arranged
-    to the left/top of the primary display (negative virtual coordinates).
-    """
+    """Capture the complete Windows virtual desktop, including every monitor."""
     if os.name != "nt":
         raise RuntimeError("Capturar tela só é suportado no Windows.")
     target = Path(path)
@@ -33,13 +28,7 @@ def capture_screen(path: str) -> str:
         f"$bmp.Save('{escaped}'); "
         "$g.Dispose(); $bmp.Dispose()"
     )
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=30, check=False)
     if result.returncode != 0 or not target.exists():
         detail = (result.stderr or "falha ao capturar o desktop virtual").strip()
         raise RuntimeError(detail)
@@ -65,11 +54,7 @@ class ScreenshotTool(Tool):
             if path:
                 target = self.file_manager._resolve_input(path, search=False)
             else:
-                base = (
-                    self.file_manager.allowed_directories[0]
-                    if self.file_manager.allowed_directories
-                    else Path.cwd()
-                )
+                base = self.file_manager.allowed_directories[0] if self.file_manager.allowed_directories else Path.cwd()
                 folder = Path(base) / "alpha_screenshots"
                 folder.mkdir(parents=True, exist_ok=True)
                 target = folder / f"screen_{int(time.time())}.png"
@@ -84,17 +69,7 @@ class ScreenshotTool(Tool):
             except Exception as exc:
                 data["vision"] = False
                 data["vision_error"] = str(exc)
-        return ToolResult(
-            name=self.name,
-            success=True,
-            data={
-                **data,
-                "hint": (
-                    "A imagem cobre todos os monitores. Use as coordenadas no espaço "
-                    "virtual do Windows ao clicar com mouse_click."
-                ),
-            },
-        )
+        return ToolResult(name=self.name, success=True, data={**data, "hint": "A imagem cobre todos os monitores. Use as coordenadas no espaço virtual do Windows ao clicar com mouse_click."})
 
 
 class VerifyScreenTool(Tool):
@@ -108,25 +83,22 @@ class VerifyScreenTool(Tool):
 
     def __init__(self, file_manager: Any, verifier: Any | None = None) -> None:
         self.file_manager = file_manager
+        if verifier is None:
+            try:
+                from app.perception.vision.verify import get_vision_verifier
+                verifier = get_vision_verifier()
+            except Exception:
+                verifier = None
         self.verifier = verifier
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         if self.verifier is None or not self.verifier.available():
-            return ToolResult(
-                name=self.name,
-                success=False,
-                data={},
-                error="Verificação visual indisponível (defina OLLAMA_VISION_MODEL).",
-            )
+            return ToolResult(name=self.name, success=False, data={}, error="Verificação visual indisponível (defina OLLAMA_VISION_MODEL).")
         goal = str(kwargs.get("goal", "") or "").strip()
-        max_retries = int(kwargs.get("max_retries", 0) or 0)
+        max_retries = int(kwargs.get("max_retries", 1) or 0)
         if not goal:
             return ToolResult(name=self.name, success=False, data={}, error="Informe a meta a verificar.")
-        base = (
-            self.file_manager.allowed_directories[0]
-            if self.file_manager.allowed_directories
-            else Path.cwd()
-        )
+        base = self.file_manager.allowed_directories[0] if self.file_manager.allowed_directories else Path.cwd()
         folder = Path(base) / "alpha_screenshots"
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / f"verify_{int(time.time())}.png"
@@ -134,19 +106,8 @@ class VerifyScreenTool(Tool):
             saved = await asyncio.to_thread(capture_screen, str(target))
         except (OSError, RuntimeError) as exc:
             return ToolResult(name=self.name, success=False, data={}, error=str(exc))
-        result = await self.verifier.verify(saved, goal, max_retries=max_retries)
-        return ToolResult(
-            name=self.name,
-            success=True,
-            data={
-                "path": saved,
-                "scope": "virtual_desktop_all_monitors",
-                "achieved": result["achieved"],
-                "attempts": result["attempts"],
-                "feedback": result["last"]["feedback"],
-                "details": result.get("details", []),
-            },
-        )
+        result = await self.verifier.verify(saved, goal, max_retries=max(0, min(2, max_retries)))
+        return ToolResult(name=self.name, success=True, data={"path": saved, "scope": "virtual_desktop_all_monitors", "achieved": result["achieved"], "confidence": result.get("confidence", 0.0), "attempts": result["attempts"], "feedback": result["last"].get("feedback", ""), "details": result.get("details", [])})
 
     def parameters_schema(self) -> dict[str, Any]:
         return {
