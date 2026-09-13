@@ -6,8 +6,10 @@ from sqlalchemy import select
 
 from app.db.models import Conversation
 from app.db.session import get_session
+from app.security.api_gate import EXECUTE_ACTION, require_local_api_auth
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+_EXEC = Depends(require_local_api_auth(EXECUTE_ACTION))
 
 
 class ConversationCreateRequest(BaseModel):
@@ -15,7 +17,7 @@ class ConversationCreateRequest(BaseModel):
 
 
 @router.get("")
-async def list_conversations(session=Depends(get_session)) -> list[dict]:
+async def list_conversations(session=Depends(get_session), _auth=_EXEC) -> list[dict]:
     conversations: list[object] = []
     try:
         if hasattr(session, "conversations"):
@@ -29,41 +31,21 @@ async def list_conversations(session=Depends(get_session)) -> list[dict]:
             conversations = list(result.scalars().all())
     except Exception:
         conversations = []
-    return [
-        {
-            "id": conversation.id,
-            "title": conversation.title,
-            "created_at": conversation.created_at.isoformat(),
-            "updated_at": conversation.updated_at.isoformat(),
-        }
-        for conversation in conversations
-    ]
+    return [{"id": conversation.id, "title": conversation.title, "created_at": conversation.created_at.isoformat(), "updated_at": conversation.updated_at.isoformat()} for conversation in conversations]
 
 
 @router.get("/{conversation_id}")
-async def get_conversation(conversation_id: str, session=Depends(get_session)) -> dict:
+async def get_conversation(conversation_id: str, session=Depends(get_session), _auth=_EXEC) -> dict:
     conversation = await session.get(Conversation, conversation_id)
     if conversation is None:
         return {"id": conversation_id, "found": False}
-    return {
-        "id": conversation.id,
-        "title": conversation.title,
-        "created_at": conversation.created_at.isoformat(),
-        "updated_at": conversation.updated_at.isoformat(),
-    }
+    return {"id": conversation.id, "title": conversation.title, "created_at": conversation.created_at.isoformat(), "updated_at": conversation.updated_at.isoformat()}
 
 
 @router.post("")
-async def create_conversation(
-    payload: ConversationCreateRequest, session=Depends(get_session)
-) -> dict:
+async def create_conversation(payload: ConversationCreateRequest, session=Depends(get_session), _auth=_EXEC) -> dict:
     conversation = Conversation(title=payload.title)
     session.add(conversation)
     await session.commit()
     await session.refresh(conversation)
-    return {
-        "id": conversation.id,
-        "title": conversation.title,
-        "created_at": conversation.created_at.isoformat(),
-        "updated_at": conversation.updated_at.isoformat(),
-    }
+    return {"id": conversation.id, "title": conversation.title, "created_at": conversation.created_at.isoformat(), "updated_at": conversation.updated_at.isoformat()}
