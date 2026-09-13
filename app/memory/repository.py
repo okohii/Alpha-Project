@@ -16,30 +16,21 @@ from app.db.models import Memory as MemoryModel
 from app.memory.policies import is_expired, retrieval_score
 
 _TOKEN_RE = re.compile(r"[a-zA-Z\u00C0-\u017F0-9]+")
+_STOPWORDS_PT = frozenset(
+    "a ao aos as com como da das de do dos e em entre essa esse esta este eu foi foram ha nas no nos o os para por que se sem sua suas te tem um uma uns umas voce vocês você é à às ao dos das na nas pelo pela pelos pelas porque isso isto isso aquele aquela aqueles aquelas".split()
+)
+
+
+def _meaningful_tokens(text: str) -> list[str]:
+    return [token for token in _TOKEN_RE.findall(text.lower()) if token not in _STOPWORDS_PT and len(token) > 1]
 
 
 class MemoryRepositoryProtocol(Protocol):
-    """Backend-neutral memory contract used by MemoryService/Agent.
-
-    Interface, nunca implementação: ``SqliteMemoryRepository`` (abaixo) é a
-    implementação concreta. O alias antigo ``MemoryRepository`` foi removido
-    (Parte 43) para impedir confundir Protocol com classe concreta.
-    """
-
     async def list(self, limit: int = 100, memory_type: str | None = None) -> list[Any]: ...
     async def get(self, memory_id: str) -> Any | None: ...
     async def save(self, memory: Any) -> Any: ...
     async def delete(self, memory_id: str) -> None: ...
-    async def search(
-        self,
-        query: str,
-        embedding: Sequence[float] | None = None,
-        *,
-        limit: int = 5,
-        min_score: float = 0.0,
-        memory_types: Sequence[str] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> list[Any]: ...
+    async def search(self, query: str, embedding: Sequence[float] | None = None, *, limit: int = 5, min_score: float = 0.0, memory_types: Sequence[str] | None = None, context: dict[str, Any] | None = None) -> list[Any]: ...
     async def purge_expired(self) -> int: ...
 
 
@@ -55,19 +46,14 @@ def cosine_similarity(a: Sequence[float] | None, b: Sequence[float] | None) -> f
 def keyword_overlap_score(query: str, content: str) -> float:
     if not query or not content:
         return 0.0
-    query_tokens = set(_TOKEN_RE.findall(query.lower()))
-    content_tokens = set(_TOKEN_RE.findall(content.lower()))
+    query_tokens = set(_meaningful_tokens(query))
+    content_tokens = set(_meaningful_tokens(content))
     if not query_tokens or not content_tokens:
         return 0.0
     return len(query_tokens & content_tokens) / math.sqrt(len(query_tokens) * len(content_tokens))
 
 
-def hybrid_score(
-    query: str,
-    content: str,
-    query_embedding: Sequence[float] | None,
-    memory_embedding: Sequence[float] | None,
-) -> float:
+def hybrid_score(query: str, content: str, query_embedding: Sequence[float] | None, memory_embedding: Sequence[float] | None) -> float:
     return 0.55 * cosine_similarity(query_embedding, memory_embedding) + 0.45 * keyword_overlap_score(query, content)
 
 
@@ -87,13 +73,6 @@ class MemoryRecord:
 
 
 class SqliteMemoryRepository:
-    """SQLAlchemy/SQLite implementation of the backend-neutral MemoryRepository.
-
-    PostgreSQL remains supported through the same SQLAlchemy adapter. A future
-    MongoDB implementation only needs to satisfy MemoryRepository; Agent and
-    MemoryService do not need to change.
-    """
-
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.logger = logging.getLogger("app.memory.repository")
@@ -101,14 +80,10 @@ class SqliteMemoryRepository:
     async def list(self, limit: int = 100, memory_type: str | None = None) -> list[MemoryModel]:
         try:
             now = datetime.now(UTC)
-            stmt = select(MemoryModel).where(
-                MemoryModel.expiration.is_(None) | (MemoryModel.expiration > now)
-            )
+            stmt = select(MemoryModel).where(MemoryModel.expiration.is_(None) | (MemoryModel.expiration > now))
             if memory_type:
                 stmt = stmt.where(MemoryModel.memory_type == memory_type)
-            result = await self.session.execute(
-                stmt.order_by(MemoryModel.created_at.desc()).limit(limit)
-            )
+            result = await self.session.execute(stmt.order_by(MemoryModel.created_at.desc()).limit(limit))
             return list(result.scalars().all())
         except SQLAlchemyError as exc:
             self.logger.debug("DB list error: %s", exc)
@@ -143,26 +118,13 @@ class SqliteMemoryRepository:
             self.logger.debug("DB delete error: %s", exc)
             raise
 
-    async def search(
-        self,
-        query: str,
-        embedding: Sequence[float] | None = None,
-        *,
-        limit: int = 5,
-        min_score: float = 0.0,
-        memory_types: Sequence[str] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> list[MemoryModel]:
+    async def search(self, query: str, embedding: Sequence[float] | None = None, *, limit: int = 5, min_score: float = 0.0, memory_types: Sequence[str] | None = None, context: dict[str, Any] | None = None) -> list[MemoryModel]:
         now = datetime.now(UTC)
         try:
-            stmt = select(MemoryModel).where(
-                MemoryModel.expiration.is_(None) | (MemoryModel.expiration > now)
-            )
+            stmt = select(MemoryModel).where(MemoryModel.expiration.is_(None) | (MemoryModel.expiration > now))
             if memory_types:
                 stmt = stmt.where(MemoryModel.memory_type.in_(list(memory_types)))
-            result = await self.session.execute(
-                stmt.order_by(MemoryModel.created_at.desc()).limit(500)
-            )
+            result = await self.session.execute(stmt.order_by(MemoryModel.created_at.desc()).limit(500))
             candidates = list(result.scalars().all())
         except SQLAlchemyError as exc:
             self.logger.debug("DB search error: %s", exc)
@@ -173,22 +135,8 @@ class SqliteMemoryRepository:
         for memory in candidates:
             similarity = hybrid_score(query, memory.content, embedding, memory.embedding)
             lexical = keyword_overlap_score(query, memory.content)
-            context_score = 1.0 if context and any(
-                str(value).lower() in memory.content.lower()
-                for value in context.values()
-                if value
-            ) else lexical
-            score = retrieval_score(
-                similarity,
-                memory.importance,
-                memory.created_at,
-                memory.memory_type,
-                context_score=context_score,
-                now=now,
-            )
-            # min_score é o corte de RELEVÂNCIA: memória sem relevância não
-            # passa mesmo sendo importante/recorrerte (piso de importância não
-            # contamina o filtro). Ranking continua pelo score composto.
+            context_score = 1.0 if context and any(str(value).lower() in memory.content.lower() for value in context.values() if value) else lexical
+            score = retrieval_score(similarity, memory.importance, memory.created_at, memory.memory_type, context_score=context_score, now=now)
             relevance = max(0.0, min(1.0, similarity))
             if relevance >= min_score:
                 scored.append((memory, score))
@@ -196,23 +144,12 @@ class SqliteMemoryRepository:
         scored.sort(key=lambda pair: pair[1], reverse=True)
         return [memory for memory, _ in scored[:limit]]
 
-    async def search_by_embedding(
-        self,
-        embedding: Sequence[float],
-        limit: int = 5,
-        keyword: str | None = None,
-        min_score: float = 0.0,
-    ) -> list[MemoryModel]:
+    async def search_by_embedding(self, embedding: Sequence[float], limit: int = 5, keyword: str | None = None, min_score: float = 0.0) -> list[MemoryModel]:
         return await self.search(keyword or "", embedding, limit=limit, min_score=min_score)
 
     async def purge_expired(self) -> int:
         try:
-            result = await self.session.execute(
-                delete(MemoryModel).where(
-                    MemoryModel.expiration.is_not(None),
-                    MemoryModel.expiration <= datetime.now(UTC),
-                )
-            )
+            result = await self.session.execute(delete(MemoryModel).where(MemoryModel.expiration.is_not(None), MemoryModel.expiration <= datetime.now(UTC)))
             await self.session.commit()
             return int(result.rowcount or 0)
         except SQLAlchemyError as exc:
@@ -221,11 +158,4 @@ class SqliteMemoryRepository:
             return 0
 
 
-__all__ = [
-    "MemoryRecord",
-    "MemoryRepositoryProtocol",
-    "SqliteMemoryRepository",
-    "cosine_similarity",
-    "hybrid_score",
-    "keyword_overlap_score",
-]
+__all__ = ["MemoryRecord", "MemoryRepositoryProtocol", "SqliteMemoryRepository", "cosine_similarity", "hybrid_score", "keyword_overlap_score"]
