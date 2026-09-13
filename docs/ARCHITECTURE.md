@@ -2,64 +2,51 @@
 
 Mapa dos módulos de `app/` e princípios que guiam a estrutura.
 
-## Visão geral
+## Fluxo principal
 
-`app/` é organizado por **domínio**, com provedores plugáveis e serviços transversais isolados.
-
-## Fluxo principal (User → Result)
-
-```
+```text
 User (texto/voz)
    → Facilitator: Request → Intent → Goal
-   → Complexity Gate
-   → Planner: Goal → Plan
+   → Complexity Gate → Planner
    → Skill/Tool: seleção + permissão determinística
    → Perception: UIA → DOM/CDP → OCR/Tesseract → Vision
    → Evidence/Verification
    → Done / Recover
 ```
 
-## Mapa de módulos
+## Fronteiras de responsabilidade
 
-| Pacote | Responsabilidade | Destaques |
-| --- | --- | --- |
-| `app/agent/` | Núcleo do agente | `AgentCore`, `SerializedAgentCore`, `ReliableAgentCore`, `Planner` |
-| `app/api/` | REST FastAPI | rotas protegidas por token local quando sensíveis |
-| `app/assistant/` | Camada COMPREENDER | Facilitator, Intent, entidades, resolução e ambiguidade |
-| `app/avatar/` | Reflexo visual e sessão de voz | `AvatarController`, `AvatarSession`, WS local |
-| `app/calendar/` | Agenda declarativa | eventos persistentes; não executa ações arbitrárias |
-| `app/cli/` | Launcher | `alpha`, `alpha chat`, `alpha macros` |
-| `app/core/` | Infra transversal | config, EventBus, filas limitadas, presentation helpers |
-| `app/db/` | Persistência | sessão e modelos |
-| `app/documents/` | Documentos | parsing e indexação |
-| `app/llm/` | Provedores de LLM | router, fallback e trust boundary |
-| `app/memory/` | Memória e episódios | repository + serviço + retenção |
-| `app/perception/` | Entrada sensorial | STT, UIA, DOM/CDP adapter, OCR real opcional, Vision |
-| `app/reminders/` | Lembretes acionáveis | scheduler + ações explicitamente permitidas |
-| `app/runtime/` | Composição | `build_agent` → `ReliableAgentCore` |
-| `app/security/` | Autorização | permissões, path policy, URL/SSRF, API/WS auth, redaction |
-| `app/services/` | Serviços transversais | connectivity, web search, health/metrics |
-| `app/skills/` | Skills = domínios | cada domínio possui metadados, service e tools |
-| `app/speech/` | Áudio | captura VAD, STT, pipeline, Kokoro TTS |
-| `app/tasks/` | Execução persistente | executor + repositories |
-| `app/tools/` | Infra de tools | contratos e registry |
+- `app/agent/`: decisão, plano, execução e evidência.
+- `app/skills/`: domínios; ferramentas específicas vivem no domínio.
+- `app/tools/`: contratos e infraestrutura compartilhada.
+- `app/perception/`: fontes de observação. DOM usa CDP real; OCR usa Tesseract quando disponível; ausência de fonte nunca vira sucesso.
+- `app/avatar/controller.py`: estado visual/animação.
+- `app/avatar/voice_runtime.py`: STT, VAD, agente, TTS e interrupção.
+- `app/avatar/server.py`: somente WebSocket, fila, sessão e lifecycle.
+- `app/overlay/`: projeção de eventos para a UI compacta.
+- `app/core/interaction_state.py`: fonte única de fases de interação derivadas do EventBus; Avatar e Overlay só fazem adaptações visuais.
+- `app/core/presentation.py`: payloads de confirmação e execução compartilhados pelas UIs.
+- `app/core/scheduling.py`: relógio UTC/local e normalização temporal compartilhados por domínios de agenda.
+- `app/calendar/`: compromissos declarativos; não executa ações arbitrárias.
+- `app/reminders/`: agenda acionável com allowlist de ações seguras.
 
-## Decisões arquiteturais
+## Segurança local
 
-- **Skills = domínios** — `app/tools` guarda infraestrutura; ferramentas específicas vivem em `app/skills/<domínio>/tools`.
-- **Segurança nunca depende do LLM** — permissão, confirmação, path policy e URL policy são determinísticos.
-- **Evidência é hierárquica** — UIA/DOM são preferidos quando existem; OCR só é usado quando há motor real; Vision é fallback caro; ausência de evidência nunca vira sucesso.
-- **DOM real** — `DOMPerceptor.perceive_from_browser()` consome o contexto CDP real do `BrowserDriver`; sem CDP retorna indisponível, não uma árvore inventada.
-- **OCR real opcional** — `OCRPerceptor` usa Tesseract quando disponível e expõe confiança/caixas; sem motor real permanece indisponível.
-- **Fonte única de apresentação** — `core/presentation.py` concentra confirmation/execution payloads compartilhados pelas UIs.
-- **EventBus** — `emit()` mantém compatibilidade síncrona; `emit_async()` move sanitização para thread e permite handlers assíncronos. Handlers async recebidos pelo caminho síncrono são agendados, nunca aguardados.
-- **Execução não bloqueia o event loop** — subprocessos, COM, captura de áudio, STT/TTS e I/O pesado usam threads quando necessário; filas são limitadas.
-- **Avatar/Overlay não decidem segurança** — são projeções de eventos e interfaces de confirmação; o AgentCore continua sendo o gate.
-- **Calendar vs Reminder** — Calendar representa compromissos; Reminder representa agenda acionável. Não compartilhar estado de execução reduz acoplamento e evita que um evento de calendário vire ação automaticamente.
-- **Cancelamento** — o cancel event é propagado até o agente e as sessões de voz interrompem captura pendente via eventos de abort.
+- Operações sensíveis da API exigem `ALPHA_LOCAL_API_TOKEN`.
+- Quando uma requisição sensível vem de browser, `Origin` deve ser loopback e compatível com o `Host` da API; `Origin: null` e origens externas são rejeitadas.
+- WebSockets sensíveis exigem Origin local ou cliente sem Origin exclusivamente em loopback.
+- A política de URL bloqueia loopback, private/link-local/metadata, formas numéricas alternativas de IPv4 e hostnames que resolvem para endereços privados.
+- Path policy é determinística e bloqueia traversal/saída de `ALLOWED_DIRECTORIES`.
+- Nenhum desses gates depende do LLM.
+
+## Performance
+
+- I/O bloqueante, captura de áudio, STT/TTS e embeddings pesados devem sair do event loop.
+- `EventBus.emit_async()` sanitiza payload em thread e aguarda handlers assíncronos; `emit()` permanece compatível e agenda handlers async sem bloquear o emissor.
+- Filas de UI são limitadas e usam descarte do item mais antigo para impedir crescimento infinito.
 
 ## Validação
 
-A suíte deve cobrir: tool-call causal, falha e recuperação por estratégia alternativa, verificação positiva/negativa, cancelamento, claims sem execução, prompt injection, path traversal, SSRF/DNS rebinding, confirmação, VRAM insuficiente, DOM/CDP e OCR sem motor.
+A suíte deve cobrir: tool-call causal, falha e recuperação por estratégia alternativa, verificação positiva/negativa, cancelamento, claims sem execução, prompt injection, path traversal, CSRF/DNS rebinding, confirmação, VRAM insuficiente, DOM/CDP e OCR sem motor.
 
 Comandos locais/CI: `python -m pytest tests -q` e `python -m ruff check app tests`.
