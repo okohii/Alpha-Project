@@ -17,8 +17,9 @@ COPY scripts /app/scripts
 
 RUN pip install --upgrade pip && pip install -e .
 
-# A API REST continua disponível dentro do container (modo server).
-# Use `alpha` no host para a CLI interativa.
+# A API REST permanece somente em loopback dentro do container.
+# A exposição externa, quando necessária, deve ser feita explicitamente
+# pelo mecanismo de publicação do ambiente.
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
