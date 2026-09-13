@@ -37,15 +37,19 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", ctypes.c_ulong), ("u", _INPUTUNION)]
 
 
-# GetForegroundWindow + GetWindowText para detectar a janela ativa real
-_user32 = ctypes.windll.user32
-_user32.GetForegroundWindow.restype = ctypes.c_void_p
-_user32.GetWindowTextW.restype = ctypes.c_int
-_user32.GetWindowTextLengthW.restype = ctypes.c_int
+# ctypes.windll só existe no Windows. Manter o módulo importável em Linux/macOS
+# permite que o catálogo de skills e os testes de segurança sejam carregados no CI.
+_user32 = ctypes.windll.user32 if os.name == "nt" else None
+if _user32 is not None:
+    _user32.GetForegroundWindow.restype = ctypes.c_void_p
+    _user32.GetWindowTextW.restype = ctypes.c_int
+    _user32.GetWindowTextLengthW.restype = ctypes.c_int
 
 
 def _get_foreground_window_title() -> str | None:
     """Retorna o título da janela em primeiro plano (None se não houver)."""
+    if _user32 is None:
+        return None
     hwnd = _user32.GetForegroundWindow()
     if not hwnd:
         return None
@@ -59,6 +63,8 @@ def _get_foreground_window_title() -> str | None:
 
 
 def _send_key(vk: int, scan: int, flags: int) -> None:
+    if _user32 is None:
+        raise RuntimeError("Controle de teclado só é suportado no Windows.")
     extra = ctypes.c_ulong(0)
     inp = _INPUT()
     inp.type = INPUT_KEYBOARD
