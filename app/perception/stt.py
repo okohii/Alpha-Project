@@ -38,12 +38,14 @@ class SpeechToText(ABC):
 
 
 def _cuda_available() -> bool:
+    """Check the actual CTranslate2 CUDA backend used by faster-whisper."""
     try:
         import ctranslate2
         count = int(ctranslate2.get_cuda_device_count())
         if count <= 0:
             return False
-        return bool(ctranslate2.get_supported_compute_types("cuda"))
+        supported = ctranslate2.get_supported_compute_types("cuda")
+        return bool(supported)
     except Exception as exc:
         logger.warning("[stt] cuda_backend_unavailable reason=%s", exc)
     try:
@@ -82,7 +84,9 @@ def _compute_type_for_device(compute_type: str, device: str) -> str:
 
 def _is_usable_text(text: str) -> bool:
     cleaned = (text or "").strip()
-    return bool(_HAS_ALNUM_RE.search(cleaned)) and len(_ALNUM_RE.sub("", cleaned)) >= 2
+    if not _HAS_ALNUM_RE.search(cleaned):
+        return False
+    return len(_ALNUM_RE.sub("", cleaned)) >= 2
 
 
 def _decoded_confidence(segments: list[dict[str, Any]], language_probability: float) -> float:
@@ -92,10 +96,14 @@ def _decoded_confidence(segments: list[dict[str, Any]], language_probability: fl
     for segment in segments:
         logprob = segment.get("avg_logprob")
         no_speech = segment.get("no_speech_prob")
-        log_score = max(0.0, min(1.0, math.exp(float(logprob)))) if isinstance(logprob, (int, float)) else 0.5
+        if isinstance(logprob, (int, float)):
+            log_score = max(0.0, min(1.0, math.exp(float(logprob))))
+        else:
+            log_score = 0.5
         speech_score = 1.0 - max(0.0, min(1.0, float(no_speech))) if isinstance(no_speech, (int, float)) else 0.5
         scores.append((log_score + speech_score) / 2.0)
-    return max(0.0, min(1.0, (sum(scores) / len(scores)) * max(0.0, min(1.0, float(language_probability)))))
+    decoded = sum(scores) / len(scores)
+    return max(0.0, min(1.0, decoded * max(0.0, min(1.0, float(language_probability)))))
 
 
 class FasterWhisperSTT(SpeechToText):
@@ -124,12 +132,14 @@ class FasterWhisperSTT(SpeechToText):
             try:
                 self._model = WhisperModel(self.settings.stt_model_size, device=device, compute_type=compute_type)
             except Exception as exc:
-                if device != "cuda":
+                if device == "cuda":
+                    logger.warning("[stt] cuda_load_failed fallback=cpu reason=%s", exc)
+                    device = "cpu"
+                    compute_type = _compute_type_for_device("auto", "cpu")
+                    logger.info("[stt] fallback loading model=%s device=cpu compute_type=%s", self.settings.stt_model_size, compute_type)
+                    self._model = WhisperModel(self.settings.stt_model_size, device="cpu", compute_type=compute_type)
+                else:
                     raise
-                logger.warning("[stt] cuda_load_failed fallback=cpu reason=%s", exc)
-                compute_type = _compute_type_for_device("auto", "cpu")
-                self._model = WhisperModel(self.settings.stt_model_size, device="cpu", compute_type=compute_type)
-                device = "cpu"
             logger.info("[stt] model_ready device=%s compute_type=%s", device, compute_type)
             return self._model
 
@@ -150,12 +160,14 @@ class FasterWhisperSTT(SpeechToText):
             try:
                 self._wake_model = WhisperModel(size, device=device, compute_type=compute_type)
             except Exception as exc:
-                if device != "cuda":
+                if device == "cuda":
+                    logger.warning("[stt] cuda_load_failed fallback=cpu reason=%s", exc)
+                    device = "cpu"
+                    compute_type = _compute_type_for_device("auto", "cpu")
+                    logger.info("[stt] fallback loading wake_model=%s device=cpu compute_type=%s", size, compute_type)
+                    self._wake_model = WhisperModel(size, device="cpu", compute_type=compute_type)
+                else:
                     raise
-                logger.warning("[stt] cuda_load_failed fallback=cpu reason=%s", exc)
-                compute_type = _compute_type_for_device("auto", "cpu")
-                self._wake_model = WhisperModel(size, device="cpu", compute_type=compute_type)
-                device = "cpu"
             logger.info("[stt] wake_model_ready device=%s compute_type=%s", device, compute_type)
             return self._wake_model
 
@@ -192,23 +204,29 @@ class FasterWhisperSTT(SpeechToText):
         kwargs: dict[str, Any] = {
             "language": self.settings.stt_language,
             "initial_prompt": prompt or None,
+            "condition_on_previous_text": False,
             "beam_size": decode_beam_size,
             "best_of": decode_best_of,
+            "temperature": 0.0,
             "vad_filter": bool(self.settings.stt_vad_filter),
+            "without_timestamps": True,
         }
+        if self.settings.stt_vad_filter:
+            kwargs["vad_parameters"] = {"min_silence_duration_ms": max(100, int(self.settings.stt_vad_min_silence_ms))}
         if max_new_tokens is not None:
             kwargs["max_new_tokens"] = max_new_tokens
-        segments_iter, info = model.transcribe(str(audio_path), **kwargs)
-        segments = []
-        texts = []
-        for segment in segments_iter:
-            text = (segment.text or "").strip()
-            if text:
-                texts.append(text)
-            segments.append({"id": segment.id, "start": segment.start, "end": segment.end, "text": text, "avg_logprob": getattr(segment, "avg_logprob", None), "no_speech_prob": getattr(segment, "no_speech_prob", None)})
-        text = " ".join(texts).strip()
-        language_probability = float(getattr(info, "language_probability", 1.0) or 0.0)
-        confidence = _decoded_confidence(segments, language_probability)
+        logger.debug("[stt] decode_kwargs=%s", {k: v for k, v in kwargs.items() if k != "initial_prompt"})
+        segments, info = model.transcribe(str(audio_path), **kwargs)
+        collected: list[dict[str, Any]] = []
+        text_parts: list[str] = []
+        for segment in segments:
+            collected.append({"start": segment.start, "end": segment.end, "text": segment.text, "avg_logprob": getattr(segment, "avg_logprob", None), "no_speech_prob": getattr(segment, "no_speech_prob", None)})
+            text_parts.append(segment.text)
+        text = "".join(text_parts).strip()
         usable = _is_usable_text(text)
-        suspicious = (not usable) or confidence < float(self.settings.stt_min_confidence)
-        return TranscriptionResult(text=text, language=str(getattr(info, "language", self.settings.stt_language) or ""), segments=segments, confidence=confidence, is_suspicious=suspicious, is_usable=usable)
+        language_probability = float(getattr(info, "language_probability", 1.0) or 1.0)
+        confidence = _decoded_confidence(collected, language_probability)
+        threshold = 0.25 if wake_only else max(0.30, float(self.settings.stt_min_confidence))
+        is_suspicious = (not usable) or (confidence < threshold)
+        logger.info("[stt] transcribe_end mode=%s duration=%.2fs text=%r confidence=%.3f language_probability=%.3f usable=%s suspicious=%s segments=%d", "wake" if wake_only else "full", duration, text, confidence, language_probability, usable, is_suspicious, len(collected))
+        return TranscriptionResult(text=text, language=info.language or self.settings.stt_language, segments=collected, confidence=confidence, is_suspicious=is_suspicious, is_usable=usable)
