@@ -19,29 +19,22 @@ def capture_screen(path: str) -> str:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     escaped = str(target).replace("'", "''")
-    script = (
-        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
-        "$b = [System.Windows.Forms.SystemInformation]::VirtualScreen; "
-        "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; "
-        "$g = [System.Drawing.Graphics]::FromImage($bmp); "
-        "$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $b.Size); "
-        f"$bmp.Save('{escaped}'); "
-        "$g.Dispose(); $bmp.Dispose()"
-    )
+    script = ("Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
+              "$b = [System.Windows.Forms.SystemInformation]::VirtualScreen; "
+              "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; "
+              "$g = [System.Drawing.Graphics]::FromImage($bmp); "
+              "$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $b.Size); "
+              f"$bmp.Save('{escaped}'); "
+              "$g.Dispose(); $bmp.Dispose()")
     result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=30, check=False)
     if result.returncode != 0 or not target.exists():
-        detail = (result.stderr or "falha ao capturar o desktop virtual").strip()
-        raise RuntimeError(detail)
+        raise RuntimeError((result.stderr or "falha ao capturar o desktop virtual").strip())
     return str(target)
 
 
 class ScreenshotTool(Tool):
     name = "screenshot"
-    description = (
-        "Captura o desktop virtual inteiro (todos os monitores) e salva um PNG dentro "
-        "das pastas permitidas; retorna o caminho e, se a visão estiver configurada, "
-        "uma descrição visual dos apps e botões com coordenadas aproximadas."
-    )
+    description = "Captura o desktop virtual inteiro (todos os monitores) e salva um PNG dentro das pastas permitidas; retorna o caminho e, se a visão estiver configurada, uma descrição visual dos apps e botões com coordenadas aproximadas."
     permission = ToolPermission.write
 
     def __init__(self, file_manager: Any, vision: Any = None) -> None:
@@ -74,11 +67,7 @@ class ScreenshotTool(Tool):
 
 class VerifyScreenTool(Tool):
     name = "verify_screen"
-    description = (
-        "Tira um screenshot do desktop virtual inteiro (todos os monitores), envia ao "
-        "modelo de visão e responde se uma meta foi atingida. Útil para confirmar que "
-        "uma ação teve o efeito esperado em qualquer monitor."
-    )
+    description = "Tira um screenshot do desktop virtual inteiro (todos os monitores), envia ao modelo de visão e responde se uma meta foi atingida. Útil para confirmar que uma ação teve o efeito esperado em qualquer monitor."
     permission = ToolPermission.read
 
     def __init__(self, file_manager: Any, verifier: Any | None = None) -> None:
@@ -95,26 +84,30 @@ class VerifyScreenTool(Tool):
         if self.verifier is None or not self.verifier.available():
             return ToolResult(name=self.name, success=False, data={}, error="Verificação visual indisponível (defina OLLAMA_VISION_MODEL).")
         goal = str(kwargs.get("goal", "") or "").strip()
-        max_retries = int(kwargs.get("max_retries", 1) or 0)
+        max_retries = max(0, min(2, int(kwargs.get("max_retries", 1) or 0)))
         if not goal:
             return ToolResult(name=self.name, success=False, data={}, error="Informe a meta a verificar.")
         base = self.file_manager.allowed_directories[0] if self.file_manager.allowed_directories else Path.cwd()
         folder = Path(base) / "alpha_screenshots"
         folder.mkdir(parents=True, exist_ok=True)
-        target = folder / f"verify_{int(time.time())}.png"
-        try:
-            saved = await asyncio.to_thread(capture_screen, str(target))
-        except (OSError, RuntimeError) as exc:
-            return ToolResult(name=self.name, success=False, data={}, error=str(exc))
-        result = await self.verifier.verify(saved, goal, max_retries=max(0, min(2, max_retries)))
-        return ToolResult(name=self.name, success=True, data={"path": saved, "scope": "virtual_desktop_all_monitors", "achieved": result["achieved"], "confidence": result.get("confidence", 0.0), "attempts": result["attempts"], "feedback": result["last"].get("feedback", ""), "details": result.get("details", [])})
+        details: list[dict[str, Any]] = []
+        last_result: dict[str, Any] | None = None
+        for attempt in range(max_retries + 1):
+            target = folder / f"verify_{time.time_ns()}.png"
+            try:
+                saved = await asyncio.to_thread(capture_screen, str(target))
+            except (OSError, RuntimeError) as exc:
+                return ToolResult(name=self.name, success=False, data={}, error=str(exc))
+            # Uma tentativa = uma captura nova. O retry muda a evidência visual,
+            # evitando avaliar repetidamente uma tela antiga após uma ação GUI.
+            last_result = await self.verifier.verify(saved, goal, max_retries=0)
+            details.append(last_result.get("last", {}))
+            if last_result.get("achieved") is True and float(last_result.get("confidence", 0.0) or 0.0) >= 0.80:
+                return ToolResult(name=self.name, success=True, data={"path": saved, "scope": "virtual_desktop_all_monitors", "achieved": True, "confidence": last_result.get("confidence", 0.0), "attempts": attempt + 1, "feedback": last_result.get("last", {}).get("feedback", ""), "details": details})
+            if attempt < max_retries:
+                await asyncio.sleep(1.0)
+        assert last_result is not None
+        return ToolResult(name=self.name, success=True, data={"path": saved, "scope": "virtual_desktop_all_monitors", "achieved": last_result.get("achieved"), "confidence": last_result.get("confidence", 0.0), "attempts": max_retries + 1, "feedback": last_result.get("last", {}).get("feedback", ""), "details": details})
 
     def parameters_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "goal": {"type": "string", "description": "O que você espera ver após a ação."},
-                "max_retries": {"type": "integer", "description": "Número de novas verificações visuais."},
-            },
-            "required": ["goal"],
-        }
+        return {"type": "object", "properties": {"goal": {"type": "string", "description": "O que você espera ver após a ação."}, "max_retries": {"type": "integer", "description": "Número de novas capturas/verificações visuais."}}, "required": ["goal"]}
