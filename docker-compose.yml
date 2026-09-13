@@ -2,11 +2,11 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: ALPHA
-      POSTGRES_PASSWORD: ALPHA
-      POSTGRES_DB: ALPHA
+      POSTGRES_USER: ${ALPHA_POSTGRES_USER:?ALPHA_POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${ALPHA_POSTGRES_PASSWORD:?ALPHA_POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${ALPHA_POSTGRES_DB:-ALPHA}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - alpha_postgres_data:/var/lib/postgresql/data
 
@@ -15,11 +15,11 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://ALPHA:ALPHA@postgres:5432/ALPHA
+      DATABASE_URL: postgresql+asyncpg://${ALPHA_POSTGRES_USER}:${ALPHA_POSTGRES_PASSWORD}@postgres:5432/${ALPHA_POSTGRES_DB:-ALPHA}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       - postgres
 
