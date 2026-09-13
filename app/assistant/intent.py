@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -14,15 +15,29 @@ DIRECT_INTENTS = frozenset(
 
 _OUI_SIMPLE = (
     "oi", "olá", "ola", "opa", "e ai", "e aí", "bom dia", "boa tarde",
-    "boa noite", "salve", "hey",
+    "boa noite", "salve", "hey", "ta por ai", "ta por aí", "to por aí",
+    "to por ai", "tá aí", "tá ai",
 )
 _THANK_SIMPLE = ("obrigado", "obrigada", "valeu", "grato", "agradeço")
 _FAREWELL_SIMPLE = ("tchau", "adeus", "até logo", "ate logo", "até mais", "ate mais")
+
+
+def _unaccent(text: str) -> str:
+    """Remove acentos para comparação robusta (NFD + descarta diacríticos)."""
+    normalized = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+
 _QUESTION_SIMPLE = (
     "o que é", "o que significa", "qual é", "como funciona", "quem é",
     "onde fica", "quando é",
 )
+# Variantes sem acento para detecção robusta quando o usuário digita sem a
+# acentuação ("qual e a capital" -> direct_question, não generic).
+_QUESTION_SIMPLE_NORM = tuple(_unaccent(question) for question in _QUESTION_SIMPLE)
 _STOP_WORDS = {"oi", "olá", "ola", "obrigado", "obrigada", "tchau", "adeus"}
+
+
 _ACTION_VERBS = (
     "pesquisar", "procurar", "abra", "abrir", "abre", "enviar", "manda",
     "criar", "agendar", "lembrar", "abrir o",
@@ -155,7 +170,7 @@ class IntentDetector:
             )
         if _matches_any(lowered, _FAREWELL_SIMPLE):
             return Intent(name="farewell", confidence=0.99, direct_response="Até logo!")
-        if any(q in lowered for q in _QUESTION_SIMPLE):
+        if any(q in _unaccent(lowered) for q in _QUESTION_SIMPLE_NORM):
             return Intent(name="direct_question", confidence=0.9)
         if _is_direct_info(lowered):
             return Intent(name="direct_info", confidence=0.85)

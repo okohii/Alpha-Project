@@ -63,6 +63,14 @@ def require_local_api_auth(action: str):
         origin: str | None = Header(default=None),
         host: str | None = Header(default=None),
     ) -> None:
+        # Fora de invocação pelo FastAPI (dep. injetada), os parâmetros podem
+        # carregar o sentinela `Header(...)` do Starlette em vez de string.
+        # Falha segura: trata como ausente (native client) e segue exigindo
+        # token — nunca passa a crashar no parse de Origin.
+        if not isinstance(origin, str):
+            origin = None
+        if not isinstance(host, str):
+            host = None
         if not _origin_matches_local_api(origin, host):
             raise HTTPException(
                 status_code=403,

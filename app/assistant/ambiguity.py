@@ -56,11 +56,17 @@ class AmbiguityDetector:
 
         referent = entities.get("referent")
         if referent is not None and not referent.resolved:
-            return AmbiguityIssue(
-                reason=f"não consigo identificar o que é '{referent.value}': "
-                "preciso que você esclareça o que quer dizer.",
-                missing="referent",
-            )
+            # "isso/aí" só exige esclarecimento quando o usuário espera uma
+            # ação sobre o objeto: intent acionável OU há um contato citado
+            # ("mande isso para o João"). Em conversa genérica ("ta por ai?")
+            # o déitico é casual, não alvo de ação — deixa fluir a resposta
+            # direta em vez de travar o turno.
+            if intent.name != "generic" or "contact" in entities:
+                return AmbiguityIssue(
+                    reason=f"não consigo identificar o que é '{referent.value}': "
+                    "preciso que você esclareça o que quer dizer.",
+                    missing="referent",
+                )
 
         contact = entities.get("contact")
         if contact is not None and not contact.resolved:
@@ -98,9 +104,9 @@ class AmbiguityDetector:
                 "por favor, reformule."
             )
 
-        if intent.name == "generic":
-            return AmbiguityIssue(
-                reason="não entendi bem o que você pediu"
-            )
+        # Intent "generic" sem entidade em aberto não é ambiguidade: o
+        # Facilitator responde com réplica curta sem travar o turno (um "não
+        # entendi bem" em bloco transformaria qualquer frase casual em pergunta
+        # de esclarecimento invisível para a UI).
 
         return None

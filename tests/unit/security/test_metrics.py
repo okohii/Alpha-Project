@@ -20,9 +20,10 @@ def test_metrics_histogram_render():
     m.observe("alpha_llm_turn_seconds", 0.5)
     m.observe("alpha_llm_turn_seconds", 1.2)
     rendered = m.render()
-    assert "# TYPE alpha_llm_turn_seconds_seconds histogram" in rendered
-    assert "alpha_llm_turn_seconds_seconds_sum 1.7" in rendered
-    assert "alpha_llm_turn_seconds_seconds_count 2" in rendered
+    # O nome já termina em _seconds: o renderer NÃO duplica o sufixo de unidade.
+    assert "# TYPE alpha_llm_turn_seconds histogram" in rendered
+    assert "alpha_llm_turn_seconds_sum 1.7" in rendered
+    assert "alpha_llm_turn_seconds_count 2" in rendered
 
 
 def test_record_times_and_registers_histogram():

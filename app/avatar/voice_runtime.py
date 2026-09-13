@@ -170,24 +170,53 @@ class AvatarVoiceRuntime:
                         wake_confidence = float(wake_result.get("confidence") or 0.0)
                         wake_suspicious = bool(wake_result.get("is_suspicious"))
                         wake_word = find_wake_word(wake_text, settings.wake_words)
+                        if wake_word is None and wake_text and not wake_suspicious:
+                            # O tiny pode derrubar/errar a wake word ("Alpha" -> "Alza",
+                            # "Abro..."). A transcrição full no MESMO áudio é a fonte
+                            # de verdade: só segue se ela também confirmar a palavra.
+                            try:
+                                full_result = await pipeline.process(path)
+                            except Exception:
+                                full_result = {"transcription": "", "confidence": 0.0, "is_suspicious": True}
+                            full_word = find_wake_word((full_result.get("transcription") or ""), settings.wake_words)
+                            if full_word is not None and not bool(full_result.get("is_suspicious")):
+                                logger.info("[avatar] wake confirmed via full STT word=%r tiny_text=%r full_text=%r", full_word, wake_text, full_result.get("transcription"))
+                                wake_result = full_result
+                                wake_text = (full_result.get("transcription") or "").strip()
+                                wake_confidence = float(full_result.get("confidence") or 0.0)
+                                wake_word = full_word
+                            else:
+                                logger.info("[avatar] wake not found (tiny=%r full=%r) -> pedir repetição", wake_text, full_result.get("transcription"))
+                                await self.session.push({"type": "caption", "from": "alpha", "text": "Pode repetir?"})
+                                continue
                         if wake_suspicious or not wake_text or wake_word is None or wake_confidence < 0.30:
+                            logger.debug("[avatar] wake rejected text=%r confidence=%.3f suspicious=%s", wake_text, wake_confidence, wake_suspicious)
                             continue
                         await self.session.set_interaction(True, "wake_word")
                         _, wake_command = strip_wake_prefix(wake_text, settings.wake_words)
                         wake_command = (wake_command or "").strip(" .,!?;:\n\t")
                         if not wake_command:
+                            # Só o wake word foi dito: ativar a interação agora,
+                            # para o próximo turno ser transcrito pelo full STT.
+                            if self.session._interaction:
+                                self.session._interaction.decide(wake_text)
                             continue
                         if wake_confidence >= settings.wake_command_min_confidence and not wake_suspicious:
-                            text = wake_command
+                            text = wake_text
                         else:
                             try:
                                 result = await pipeline.process(path)
                             except Exception:
                                 result = {"transcription": "", "confidence": 0.0, "is_suspicious": True}
-                            kind, text = choose_after_wake(full_text=result.get("transcription", ""), full_confidence=float(result.get("confidence") or 0.0), full_suspicious=bool(result.get("is_suspicious")), full_failed=False, wake_command=wake_command, wake_confidence=wake_confidence, min_command_confidence=settings.wake_command_min_confidence)
+                            full_text = (result.get("transcription") or "").strip()
+                            kind, _ = choose_after_wake(full_text=full_text, full_confidence=float(result.get("confidence") or 0.0), full_suspicious=bool(result.get("is_suspicious")), full_failed=False, wake_command=wake_command, wake_confidence=wake_confidence, min_command_confidence=settings.wake_command_min_confidence)
                             if kind == "skip":
                                 await self.session.push({"type": "caption", "from": "alpha", "text": "Pode repetir?"})
                                 continue
+                            if kind == "full" and find_wake_word(full_text, settings.wake_words) is not None:
+                                text = full_text
+                            else:
+                                text = wake_text
                     else:
                         try:
                             result = await pipeline.process(path)

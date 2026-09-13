@@ -85,6 +85,10 @@ _FALLBACK_ON_NO_SUCCESS = (
     "e tente novamente."
 )
 
+_EMPTY_RESPONSE_FALLBACK = (
+    "Não consegui formular uma resposta agora. Pode reformular a pergunta?"
+)
+
 # ── Retries com estratégia (P9) ─────────────────────────────────────────────
 # Falha é classificada por estrutura (não por prompt livre) e cada classe
 # carrega uma ESTRATÉGIA de recuperação que muda a abordagem — nunca repetir
@@ -542,6 +546,14 @@ class AgentCore:
                     EventType.waiting_input,
                     {"prompt": outcome.response},
                 )
+                # A pergunta de esclarecimento também é emitida como
+                # assistant_message: é o texto que as UIs apresentam (overlay/
+                # desktop/avatar). waiting_input fica como sinal de estado para
+                # consumidores programáticos; sem isso o usuário não vê nada.
+                self._emit(
+                    EventType.assistant_message,
+                    payload={"preview": (outcome.response or "")[:120], "content": outcome.response},
+                )
                 return self._fast_result(
                     response=outcome.response,
                     conversation_id=conversation_id,
@@ -777,8 +789,13 @@ class AgentCore:
             content = content.strip()
         # Honesty Gate: alegação de sucesso sem execução real é substituída.
         content = self._apply_honesty_gate(content, evidence)
-        if not content and evidence and not any(item.success for item in evidence):
-            content = _FALLBACK_ON_NO_SUCCESS
+        if not content:
+            # Resposta vazia do provedor nunca chega ao usuário como nada:
+            # entrega um fallback honesto (com/sem evidência de falha).
+            if evidence and not any(item.success for item in evidence):
+                content = _FALLBACK_ON_NO_SUCCESS
+            else:
+                content = _EMPTY_RESPONSE_FALLBACK
         final = LLMMessage(role="assistant", content=content)
         messages.append(final)
         new_messages.append(final)
@@ -1668,14 +1685,16 @@ class AgentCore:
         user_message: str,
         turn_messages: list[LLMMessage],
     ) -> None:
-        """Persiste user + assistant(tool_calls) + assistant(final).
+        """Persiste user + assistant(tool_calls) + tool(resultado) + assistant(final).
 
-        Mensagens ``role="tool"`` NÃO são persistidas — a arquitetura
-        atual reconstrói o histórico a partir do assistant serializado.
+        Mensagens ``role="tool"`` são salvas junto com o assistant que as
+        originou: o histórico posterior reconstrói o par causa-efeito sem
+        buracos causais (o assistant(tool_calls) sem o resultado deixaria o
+        próximo turno com contexto incompleto).
         """
         await self._save_message(conversation_id, "user", user_message)
         for message in turn_messages:
-            if message.role == "tool":
+            if message.role not in {"assistant", "tool"}:
                 continue
             await self._save_message(
                 conversation_id, message.role, message.content, tool_calls=message.tool_calls

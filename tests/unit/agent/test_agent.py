@@ -13,7 +13,7 @@ import asyncio
 
 import pytest
 
-from app.agent.agent import AgentCore
+from app.agent.agent import _EMPTY_RESPONSE_FALLBACK, AgentCore
 from app.core.events import EventBus, EventType
 from app.llm.base import LLMResponse, StreamedResponse, ToolCall
 from app.llm.mock import MockLLMProvider
@@ -126,7 +126,7 @@ async def test_agent_respects_tool_iteration_limit():
 
     result = await agent.chat("Que horas são?")
 
-    assert result["response"] == ""
+    assert result["response"] == _EMPTY_RESPONSE_FALLBACK
 
 
 def test_llm_router_prefers_local_for_simple_questions(monkeypatch):

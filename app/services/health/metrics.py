@@ -46,7 +46,10 @@ class Metrics:
                 values = list(self._histograms[key])
                 base, label = _split_name(key)
                 total = sum(values)
-                lines.extend(_format_histogram(base + "_seconds", label, values, total, len(values)))
+                # Histograma segue a convenção Prometheus de unidade "_seconds",
+                # sem duplicar o sufixo quando o nome já termina em _seconds.
+                unit = "" if base.endswith("_seconds") else "_seconds"
+                lines.extend(_format_histogram(base + unit, label, values, total, len(values)))
         return "\n".join(lines) + "\n"
 
 

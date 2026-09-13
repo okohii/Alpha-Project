@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from app.agent.agent import AgentCore
-from app.core.events import EventType
+from app.core.events import EventType, SystemEvent
 from app.evidence import (
     Evidence,
     EvidenceKind,
@@ -114,8 +114,19 @@ class SerializedAgentCore(AgentCore):
             return await super().chat(message, self._conversation_id_for_turn(conversation_id))
 
     async def chat_stream(self, message: str, conversation_id: str | None = None) -> AsyncIterator[Any]:
+        conversation_id = self._conversation_id_for_turn(conversation_id)
+        if self.event_bus is None:
+            # Sem barramento não há streaming real: cai para chat(), que JÁ
+            # serializa com o _turn_lock. Não adquirir o lock de novo aqui —
+            # o chat() interno re-adquiriria o MESMO lock e o coroutine
+            # (não reentrante) travaria o turno em deadlock.
+            result = await self.chat(message, conversation_id)
+            yield SystemEvent(
+                type=EventType.assistant_message,
+                payload={"content": result["response"]},
+            )
+            return
         async with self._turn_lock:
-            conversation_id = self._conversation_id_for_turn(conversation_id)
             async for event in super().chat_stream(message, conversation_id):
                 yield event
 
@@ -366,12 +377,10 @@ class SerializedAgentCore(AgentCore):
         if content and content != content.strip():
             content = content.strip()
         content = self._apply_honesty_gate(content, evidence)
-        if not content and evidence and not any(item.success for item in evidence):
-            content = (
-                "Não consegui concluir com evidência: as ferramentas necessárias falharam "
-                "ou não retornaram um resultado de sucesso. Verifique os erros relatados "
-                "e tente novamente."
-            )
+        if not content:
+            from app.agent.agent import _EMPTY_RESPONSE_FALLBACK as _EMPTY_FALLBACK
+
+            content = _EMPTY_FALLBACK
         if last_response.tool_calls and iterations >= self.settings.agent_max_tool_iterations:
             finish_reason = "tool_call_capped"
         elif last_response.tool_calls:

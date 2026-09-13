@@ -130,6 +130,15 @@ async def build_agent(
         # H7/Parte 19: confirmação de UM caminho não vira permissão permanente.
         # O grant fica APENAS em memória (escopo da sessão do agente), nunca é
         # persistido no banco como allowlist global.
+        if is_action_confirmation:
+            # Tool sensível (run_code/run_shell/...) não é caminho de filesystem:
+            # tratar como path quebraria na normalização. Nada é adicionado à
+            # allowlist de diretórios; o gate do AgentCore já limita por chamada.
+            logger.info(
+                "[security] action_grant scope=session action=%s persistence=memory",
+                display,
+            )
+            return True
         normalized = Path(candidate).expanduser().resolve()
         if normalized not in file_manager.allowed_directories:
             file_manager.allowed_directories.append(normalized)

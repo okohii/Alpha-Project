@@ -20,7 +20,7 @@ import json
 
 import pytest
 
-from app.agent.agent import AgentCore
+from app.agent.agent import _EMPTY_RESPONSE_FALLBACK, AgentCore
 from app.core.events import EventBus, EventType
 from app.llm.base import LLMMessage, LLMResponse, ToolCall
 from app.llm.mock import MockLLMProvider
@@ -366,7 +366,8 @@ async def test_iteration_limit_stops_loop():
     # provider chamado: 1º (initial) + 2º (após iter1) + 3º (após iter2)
     assert len(provider.calls) == 3
     # Response content do 3º turno (que não retornou tool_calls dentro do while)
-    assert result["response"] == ""
+    # nunca chega vazio ao usuário: um fallback honesto é entregue.
+    assert result["response"] == _EMPTY_RESPONSE_FALLBACK
 
 
 # ---- chamada repetida ----
@@ -687,10 +688,10 @@ async def test_nonexistent_tool_emits_tool_failed():
     assert any("inexistente" in t.get("error", "").lower() for t in tool_failed_events)
 
 
-# ---- evidência não persiste tool msgs no histórico ----
+# ---- evidência persiste tool msgs no histórico ----
 
 @pytest.mark.anyio
-async def test_save_turn_skips_tool_messages():
+async def test_save_turn_persists_tool_messages():
     class FakeMsg:
         def __init__(self, **kw):
             for k, v in kw.items():
@@ -717,10 +718,10 @@ async def test_save_turn_skips_tool_messages():
     ]
     await agent._save_turn("conv1", "oi", turn_messages)
 
-    # Nenhuma msg tool deve ter sido persistida
+    # Assistant(tool_calls) + tool(resultado) são persistidos juntos: o
+    # histórico preserva o par causa-efeito (mesmo contrato do SerializedAgentCore).
     added_roles = []
     for msg in session.added:
         if hasattr(msg, "role"):
             added_roles.append(msg.role)
-    assert "tool" not in added_roles
-    assert "assistant" in added_roles
+    assert added_roles == ["user", "assistant", "tool", "assistant"]
